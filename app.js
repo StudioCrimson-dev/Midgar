@@ -1,7 +1,9 @@
 /* ─────────────────────────────────────────────
    MY LIBRARY — app.js
-   Storage: localStorage  |  No dependencies
+   Storage: IndexedDB (text + images)  |  No dependencies
 ───────────────────────────────────────────── */
+
+const $ = id => document.getElementById(id);
 
 // ── State ──────────────────────────────────
 let state = {
@@ -12,28 +14,114 @@ let state = {
   editingBookId: null,
   pendingDeleteFn: null,
 };
+let editorDirty = false;            // unsaved changes in the chapter editor
+let storageReady = false;           // true once the library loaded from IndexedDB
+const pendingImageIds = new Set();  // images uploaded but not yet saved into a book/chapter
 
-// ── Persist ────────────────────────────────
-function save() { localStorage.setItem('mylibrary', JSON.stringify(state.books)); }
-function load() {
-  try { state.books = JSON.parse(localStorage.getItem('mylibrary')) || []; }
-  catch { state.books = []; }
+// ── Storage (IndexedDB) ────────────────────
+// 'kv'     → key "books": the whole library as plain JSON (titles, descriptions, chapter text)
+// 'images' → key <imageId>: image Blobs (covers + chapter pictures)
+// Chapter text refers to pictures as ![alt](img:<imageId>), so the text stays portable.
+const DB_NAME = 'mylibrary-db';
+let dbPromise = null;
+
+function openDb() {
+  if (!dbPromise) {
+    dbPromise = new Promise((resolve, reject) => {
+      const req = indexedDB.open(DB_NAME, 1);
+      req.onupgradeneeded = () => {
+        req.result.createObjectStore('kv');
+        req.result.createObjectStore('images');
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+  return dbPromise;
+}
+
+function idbRequest(store, mode, run) {
+  return openDb().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(store, mode);
+    const req = run(tx.objectStore(store));
+    tx.oncomplete = () => resolve(req.result);
+    tx.onerror = tx.onabort = () => reject(tx.error);
+  }));
+}
+
+const idb = {
+  get:  (store, key)      => idbRequest(store, 'readonly',  s => s.get(key)),
+  put:  (store, key, val) => idbRequest(store, 'readwrite', s => s.put(val, key)),
+  del:  (store, key)      => idbRequest(store, 'readwrite', s => s.delete(key)),
+  keys: store             => idbRequest(store, 'readonly',  s => s.getAllKeys()),
+};
+
+// Saves are queued so they always land in order. Resolves to true/false and
+// shows an error toast on failure, so callers can decide whether to carry on.
+let saveChain = Promise.resolve();
+function save() {
+  const snapshot = JSON.parse(JSON.stringify(state.books));
+  const p = saveChain
+    .then(() => idb.put('kv', 'books', snapshot))
+    .then(() => true, err => {
+      console.error(err);
+      toast('Could not save — browser storage error.');
+      return false;
+    });
+  saveChain = p;
+  return p;
+}
+
+async function load() {
+  try {
+    const stored = await idb.get('kv', 'books');
+    if (Array.isArray(stored)) state.books = stored;
+    else await migrateFromLocalStorage();
+    state.books.forEach(b => {
+      b.description = b.description || '';
+      b.chapters = b.chapters || [];
+    });
+    storageReady = true;
+  } catch (err) {
+    console.error(err);
+    toast('Storage is unavailable — changes will not be saved.');
+  }
+}
+
+// One-time move from the old localStorage format. The old entry is left in
+// place as a backup; delete the "mylibrary" key yourself once you're happy.
+async function migrateFromLocalStorage() {
+  let old = null;
+  try { old = JSON.parse(localStorage.getItem('mylibrary')); } catch { /* ignore */ }
+  if (!Array.isArray(old) || old.length === 0) return;
+  for (const b of old) {
+    if (typeof b.cover === 'string' && b.cover.startsWith('data:')) {
+      try {
+        const id = uid();
+        await idb.put('images', id, dataUrlToBlob(b.cover));
+        b.coverId = id;
+      } catch (err) { console.error('Cover migration failed', err); }
+    }
+    delete b.cover;
+  }
+  state.books = old;
+  await save();
 }
 
 // ── Helpers ────────────────────────────────
 function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2); }
 
 function toast(msg) {
-  const el = document.getElementById('toast');
+  const el = $('toast');
   el.textContent = msg;
   el.classList.remove('hidden');
   clearTimeout(toast._t);
-  toast._t = setTimeout(() => el.classList.add('hidden'), 2200);
+  toast._t = setTimeout(() => el.classList.add('hidden'), 2600);
 }
 
 function showView(id) {
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
-  document.getElementById(id).classList.add('active');
+  $(id).classList.add('active');
 }
 
 function bookById(id) { return state.books.find(b => b.id === id); }
@@ -46,45 +134,403 @@ function chapterCounts(book) {
 }
 
 function escHtml(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function indentOf(line) { return line.match(/^ */)[0].length; }
+function byName(a, b) { return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }); }
+
+function readText(file) {
+  if (typeof file.text === 'function') return file.text();
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+    r.readAsText(file);
+  });
+}
+
+// ── Images ─────────────────────────────────
+function dataUrlToBlob(url) {
+  const [head, data] = url.split(',');
+  const mime = (head.match(/^data:([^;,]+)/) || [])[1] || 'application/octet-stream';
+  const bin = atob(data);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type: mime });
+}
+
+// Shrinks big photos so the library stays small. GIFs and SVGs are kept as-is
+// (re-encoding would flatten animation / rasterise vectors). Whichever is
+// smaller — the original or the re-encoded copy — is what gets stored.
+async function prepareImage(file, maxDim = 1600) {
+  if (!file.type || !file.type.startsWith('image/')) throw new Error('Not an image');
+  if (file.type === 'image/gif' || file.type === 'image/svg+xml') return file;
+  try {
+    const bmp = await createImageBitmap(file);
+    const scale = Math.min(1, maxDim / Math.max(bmp.width, bmp.height));
+    if (scale === 1 && file.size < 800 * 1024) { bmp.close(); return file; }
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(bmp.width * scale));
+    canvas.height = Math.max(1, Math.round(bmp.height * scale));
+    canvas.getContext('2d').drawImage(bmp, 0, 0, canvas.width, canvas.height);
+    bmp.close();
+    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/webp', 0.85));
+    return blob && blob.size < file.size ? blob : file;
+  } catch {
+    return file;   // couldn't decode/resize — store the original
+  }
+}
+
+async function storeImage(file, maxDim) {
+  const blob = await prepareImage(file, maxDim);
+  const id = uid();
+  pendingImageIds.add(id);   // protect from cleanup until it's saved into something
+  await idb.put('images', id, blob);
+  return id;
+}
+
+// id → Promise<objectURL>. Cached so each image is read from the DB once.
+const urlCache = new Map();
+function imageUrl(id) {
+  if (!id) return Promise.resolve(null);
+  if (!urlCache.has(id)) {
+    urlCache.set(id, (async () => {
+      try {
+        const blob = await idb.get('images', id);
+        if (!blob) { urlCache.delete(id); return null; }
+        return URL.createObjectURL(blob);
+      } catch { urlCache.delete(id); return null; }
+    })());
+  }
+  return urlCache.get(id);
+}
+
+// Fills in <img data-img-id="…"> elements that the markdown renderer produced.
+async function hydrateImages(root) {
+  const imgs = [...root.querySelectorAll('img[data-img-id]')];
+  await Promise.all(imgs.map(async img => {
+    const url = await imageUrl(img.dataset.imgId);
+    if (url) img.src = url;
+    else img.classList.add('img-missing');
+  }));
+}
+
+function usedImageIds() {
+  const used = new Set();
+  for (const b of state.books) {
+    if (b.coverId) used.add(b.coverId);
+    for (const c of b.chapters) {
+      for (const m of (c.content || '').matchAll(/img:([a-z0-9]+)/gi)) used.add(m[1]);
+    }
+  }
+  return used;
+}
+
+// Deletes stored images that no book or chapter refers to any more.
+async function gcImages() {
+  if (!storageReady) return;
+  try {
+    const keys = await idb.keys('images');
+    const used = usedImageIds();
+    for (const id of keys.filter(k => !used.has(k))) {
+      if (pendingImageIds.has(id) || usedImageIds().has(id)) continue;   // re-check: state may have changed
+      await idb.del('images', id);
+      const cached = urlCache.get(id);
+      if (cached) cached.then(u => u && URL.revokeObjectURL(u));
+      urlCache.delete(id);
+    }
+  } catch (err) { console.error('Image cleanup failed', err); }
 }
 
 // ── Markdown Parser (no deps) ───────────────
+// Block pass (headings, lists, quotes, code, tables, paragraphs) followed by an
+// inline pass (emphasis, code, links, images). All text is HTML-escaped and URLs
+// are checked against an allow-list, so imported files can't inject script.
+const MD = {
+  fence:   /^\s{0,3}(`{3,}|~{3,})([^`]*)$/,
+  heading: /^\s{0,3}(#{1,6})[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$/,
+  hr:      /^\s{0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/,
+  quote:   /^\s{0,3}>/,
+  item:    /^(\s*)([-*+]|\d{1,9}[.)])[ \t]+(.*)$/,
+};
+
 function parseMarkdown(md) {
-  let html = md
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/```([\s\S]*?)```/g, (_, c) => `<pre><code>${c.trim()}</code></pre>`)
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
-    .replace(/^#{6}\s(.+)/gm, '<h6>$1</h6>')
-    .replace(/^#{5}\s(.+)/gm, '<h5>$1</h5>')
-    .replace(/^#{4}\s(.+)/gm, '<h4>$1</h4>')
-    .replace(/^#{3}\s(.+)/gm, '<h3>$1</h3>')
-    .replace(/^#{2}\s(.+)/gm, '<h2>$1</h2>')
-    .replace(/^#{1}\s(.+)/gm, '<h1>$1</h1>')
-    .replace(/^---$/gm, '<hr>')
-    .replace(/^&gt;\s(.+)/gm, '<blockquote>$1</blockquote>')
-    .replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*(.+?)\*/g, '<em>$1</em>')
-    .replace(/_(.+?)_/g, '<em>$1</em>')
-    .replace(/\[(.+?)\]\((.+?)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
-    .replace(/!\[(.+?)\]\((.+?)\)/g, '<img src="$2" alt="$1" />')
-    .replace(/^\d+\.\s(.+)/gm, '<li>$1</li>')
-    .replace(/^[-*]\s(.+)/gm, '<li>$1</li>')
-    .replace(/(<li>[\s\S]+?<\/li>)(?!\s*<li>)/g, (m) => `<ul>${m}</ul>`)
-    .split(/\n{2,}/).map(block => {
-      block = block.trim();
-      if (!block) return '';
-      if (/^<(h[1-6]|ul|ol|li|pre|blockquote|hr|tr)/.test(block)) return block;
-      return `<p>${block.replace(/\n/g, '<br>')}</p>`;
-    }).join('\n');
-  return html;
+  const lines = String(md || '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/\u0000/g, '')
+    .split('\n')
+    .map(l => l.replace(/^\t+/, t => '    '.repeat(t.length)));
+  return parseBlocks(lines);
+}
+
+function isBlockStart(line, inParagraph) {
+  if (MD.fence.test(line) || MD.heading.test(line) || MD.hr.test(line) || MD.quote.test(line)) return true;
+  const m = line.match(MD.item);
+  if (!m) return false;
+  // Inside a paragraph, only "1." may start a numbered list (so "…in\n1999. It…" stays prose)
+  return !inParagraph || !/^\d/.test(m[2]) || parseInt(m[2], 10) === 1;
+}
+
+function splitRow(line) {
+  let s = line.trim();
+  if (s.startsWith('|')) s = s.slice(1);
+  if (s.endsWith('|') && !s.endsWith('\\|')) s = s.slice(0, -1);
+  return s.replace(/\\\|/g, '\u0001').split('|').map(c => c.replace(/\u0001/g, '|').trim());
+}
+
+function parseBlocks(lines) {
+  const out = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) { i++; continue; }
+    let m;
+
+    // Fenced code block
+    if ((m = line.match(MD.fence))) {
+      const ch = m[1][0];
+      const closer = new RegExp('^\\s{0,3}' + (ch === '`' ? '`' : '~') + '{' + m[1].length + ',}\\s*$');
+      const lang = (m[2].trim().split(/\s+/)[0] || '').replace(/[^\w+-]/g, '');
+      const buf = [];
+      i++;
+      while (i < lines.length && !closer.test(lines[i])) buf.push(lines[i++]);
+      i++; // skip closing fence
+      out.push(`<pre><code${lang ? ` class="lang-${lang}"` : ''}>${escHtml(buf.join('\n'))}</code></pre>`);
+      continue;
+    }
+
+    // Heading
+    if ((m = line.match(MD.heading))) {
+      const n = m[1].length;
+      out.push(`<h${n}>${inline(m[2])}</h${n}>`);
+      i++;
+      continue;
+    }
+
+    // Horizontal rule
+    if (MD.hr.test(line)) { out.push('<hr>'); i++; continue; }
+
+    // Blockquote (may contain any other block)
+    if (MD.quote.test(line)) {
+      const buf = [];
+      while (i < lines.length && MD.quote.test(lines[i])) buf.push(lines[i++].replace(/^\s{0,3}>[ \t]?/, ''));
+      out.push(`<blockquote>${parseBlocks(buf)}</blockquote>`);
+      continue;
+    }
+
+    // Table
+    if (line.includes('|') && i + 1 < lines.length && lines[i + 1].includes('|') && lines[i + 1].includes('-')) {
+      const head = splitRow(line);
+      const sep = splitRow(lines[i + 1]);
+      if (head.length === sep.length && sep.every(c => /^:?-+:?$/.test(c))) {
+        const aligns = sep.map(c => c.startsWith(':') && c.endsWith(':') ? 'center' : c.endsWith(':') ? 'right' : c.startsWith(':') ? 'left' : '');
+        const cell = (tag, text, a) => `<${tag}${a ? ` style="text-align:${a}"` : ''}>${inline(text)}</${tag}>`;
+        const rows = [];
+        i += 2;
+        while (i < lines.length && lines[i].trim() && lines[i].includes('|')) rows.push(splitRow(lines[i++]));
+        out.push('<div class="table-wrap"><table><thead><tr>' +
+          head.map((c, k) => cell('th', c, aligns[k])).join('') +
+          '</tr></thead><tbody>' +
+          rows.map(r => '<tr>' + head.map((_, k) => cell('td', r[k] || '', aligns[k])).join('') + '</tr>').join('') +
+          '</tbody></table></div>');
+        continue;
+      }
+    }
+
+    // List (bullet or numbered, nesting by indentation)
+    if ((m = line.match(MD.item))) {
+      const base = m[1].length;
+      const ordered = /^\d/.test(m[2]);
+      const start = ordered ? parseInt(m[2], 10) : 1;
+      const sameList = lm => lm && lm[1].length === base && /^\d/.test(lm[2]) === ordered;
+      const items = [];
+      let cur = null;
+      while (i < lines.length) {
+        const l = lines[i];
+        const lm = l.match(MD.item);
+        if (sameList(lm) && !MD.hr.test(l)) { cur = [lm[3]]; items.push(cur); i++; continue; }
+        if (!l.trim()) {
+          let j = i;
+          while (j < lines.length && !lines[j].trim()) j++;
+          const next = lines[j];
+          if (next !== undefined && (indentOf(next) > base || sameList(next.match(MD.item)))) {
+            for (let k = i; k < j; k++) cur.push('');
+            i = j;
+            continue;
+          }
+          break;
+        }
+        if (indentOf(l) > base) { cur.push(l.slice(Math.min(indentOf(l), base + 2))); i++; continue; }
+        if (!isBlockStart(l, true)) { cur.push(l.trim()); i++; continue; }   // lazy continuation
+        break;
+      }
+      const tag = ordered ? 'ol' : 'ul';
+      const startAttr = ordered && start !== 1 ? ` start="${start}"` : '';
+      out.push(`<${tag}${startAttr}>` +
+        items.map(it => `<li>${parseBlocks(it).replace(/^<p>([\s\S]*?)<\/p>/, '$1')}</li>`).join('') +
+        `</${tag}>`);
+      continue;
+    }
+
+    // Paragraph
+    const buf = [line.trim()];
+    i++;
+    while (i < lines.length && lines[i].trim() && !isBlockStart(lines[i], true)) buf.push(lines[i++].trim());
+    out.push(`<p>${inline(buf.join('\n'))}</p>`);
+  }
+  return out.join('\n');
+}
+
+function inline(raw) {
+  const stash = [];
+  const hold = html => `\u0000${stash.push(html) - 1}\u0000`;
+  let s = raw
+    .replace(/(`+)([\s\S]*?[^`])\1(?!`)/g, (_, __, code) => hold(`<code>${escHtml(code.trim())}</code>`))
+    .replace(/\\([\\`*_{}\[\]()#+\-.!~|>])/g, (_, c) => hold(escHtml(c)));
+  s = formatInline(escHtml(s), hold);
+  for (let guard = 0; /\u0000\d+\u0000/.test(s) && guard < 10; guard++) {
+    s = s.replace(/\u0000(\d+)\u0000/g, (_, n) => stash[+n]);
+  }
+  return s.replace(/\n/g, '<br>\n');
+}
+
+function formatInline(s, hold) {
+  const URL_RE = '((?:[^()\\s]|\\([^()\\s]*\\))+)';
+  const TITLE_RE = '(?:\\s+&quot;[\\s\\S]*?&quot;)?';
+  s = s.replace(new RegExp('!\\[([^\\]]*)\\]\\(\\s*' + URL_RE + TITLE_RE + '\\s*\\)', 'g'),
+    (_, alt, url) => hold(imageHtml(alt, url)));
+  s = s.replace(new RegExp('\\[((?:[^\\[\\]]|\\[[^\\[\\]]*\\])+)\\]\\(\\s*' + URL_RE + TITLE_RE + '\\s*\\)', 'g'),
+    (_, label, url) => hold(linkHtml(formatInline(label, hold), url)));
+  s = s.replace(/&lt;((?:https?:\/\/|mailto:)\S*?)&gt;/g, (_, url) => hold(linkHtml(url, url)));
+  return s
+    .replace(/\*\*\*(?=\S)([\s\S]*?\S)\*\*\*/g, '<strong><em>$1</em></strong>')
+    .replace(/\*\*(?=\S)([\s\S]*?\S)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(?=\S)([\s\S]*?\S)\*/g, '<em>$1</em>')
+    .replace(/(^|[^\w])__(?=\S)([\s\S]*?\S)__(?!\w)/g, '$1<strong>$2</strong>')
+    .replace(/(^|[^\w])_(?=\S)([\s\S]*?\S)_(?!\w)/g, '$1<em>$2</em>')
+    .replace(/~~(?=\S)([\s\S]*?\S)~~/g, '<del>$1</del>');
+}
+
+// Returns the URL if it's safe for this use, otherwise null.
+function safeUrl(url, kind) {
+  if (url.includes('\u0000')) return null;
+  const clean = url.replace(/[\u0000-\u0020\u007f]/g, '');
+  const m = clean.match(/^([a-z][a-z0-9+.\-]*):/i);
+  if (!m) return url;                                   // relative path or #anchor
+  const scheme = m[1].toLowerCase();
+  if (kind === 'link') return ['http', 'https', 'mailto', 'tel'].includes(scheme) ? url : null;
+  if (scheme === 'http' || scheme === 'https') return url;
+  if (scheme === 'img') return /^img:[a-z0-9]+$/i.test(clean) ? clean : null;
+  if (scheme === 'data') return /^data:image\/(png|jpe?g|gif|webp);base64,[a-z0-9+\/=]+$/i.test(clean) ? clean : null;
+  return null;
+}
+
+function imageHtml(alt, url) {
+  const u = safeUrl(url, 'image');
+  if (u === null) return alt;
+  const stored = u.match(/^img:([a-z0-9]+)$/i);
+  if (stored) return `<img data-img-id="${stored[1]}" alt="${alt}">`;
+  return `<img src="${u}" alt="${alt}" loading="lazy">`;
+}
+
+function linkHtml(labelHtml, url) {
+  const u = safeUrl(url, 'link');
+  if (u === null) return labelHtml;
+  return `<a href="${u}" target="_blank" rel="noopener noreferrer">${labelHtml}</a>`;
+}
+
+// ── Markdown import helpers ─────────────────
+// Splits a .md file into a chapter title and body. Title comes from YAML front
+// matter ("title:"), else a leading "# Heading", else the file name.
+function splitMarkdownDoc(text, filename) {
+  let body = text.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
+  let title = '';
+  const fm = body.match(/^---\n([\s\S]*?)\n---[ \t]*(?:\n|$)/);
+  if (fm) {
+    const t = fm[1].match(/^title:[ \t]*(.+)$/mi);
+    if (t) title = t[1].trim().replace(/^(['"])(.*)\1$/, '$2');
+    body = body.slice(fm[0].length);
+  }
+  const h1 = body.match(/^\s*#[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*(?:\n|$)/);
+  if (h1) {
+    const headingText = h1[1].trim().replace(/[*`]/g, '');
+    if (!title || headingText.toLowerCase() === title.toLowerCase()) {
+      if (!title) title = headingText;
+      body = body.slice(h1[0].length);      // the title is shown separately, so drop the duplicate heading
+    }
+  }
+  if (!title) title = filename.replace(/\.[^.]+$/, '').replace(/[-_]+/g, ' ').trim() || 'Untitled Chapter';
+  return { title, body: body.replace(/^\n+/, '') };
+}
+
+// Rewrites ![alt](some/path/pic.png) to point at a bundled image with the same
+// file name. Returns the new text and how many local images couldn't be matched.
+function rewriteImageRefs(text, imageMap) {
+  let missing = 0;
+  const out = text.replace(/(!\[[^\]]*\]\(\s*)((?:[^()\s]|\([^()\s]*\))+)/g, (all, pre, url) => {
+    if (/^(https?:|data:|img:)/i.test(url)) return all;
+    let name = url.split(/[?#]/)[0].split('/').pop();
+    try { name = decodeURIComponent(name); } catch { /* keep raw */ }
+    const id = imageMap.get(name.toLowerCase());
+    if (id) return `${pre}img:${id}`;
+    missing++;
+    return all;
+  });
+  return { text: out, missing };
+}
+
+async function importMarkdownFiles(fileList) {
+  const book = bookById(state.currentBookId);
+  if (!book) return;
+  const files = [...fileList];
+  const mdFiles = files
+    .filter(f => /\.(md|markdown|mdown|txt)$/i.test(f.name) || f.type === 'text/markdown')
+    .sort(byName);
+  const imgFiles = files.filter(f => f.type && f.type.startsWith('image/'));
+  if (mdFiles.length === 0) { toast('Pick at least one .md file.'); return; }
+
+  const imageMap = new Map();
+  for (const f of imgFiles) {
+    try { imageMap.set(f.name.toLowerCase(), await storeImage(f)); }
+    catch (err) { console.error(err); }
+  }
+
+  const added = [];
+  let unmatched = 0;
+  for (const f of mdFiles) {
+    try {
+      const { title, body } = splitMarkdownDoc(await readText(f), f.name);
+      const rewritten = rewriteImageRefs(body, imageMap);
+      unmatched += rewritten.missing;
+      added.push({ id: uid(), title, content: rewritten.text, isInfo: false });
+    } catch (err) {
+      console.error(err);
+      toast(`Couldn't read ${f.name}.`);
+    }
+  }
+  if (added.length === 0) return;
+
+  book.chapters.push(...added);
+  if (!(await save())) {
+    book.chapters = book.chapters.filter(c => !added.includes(c));   // roll back
+    return;
+  }
+  pendingImageIds.clear();
+  updateChapterBadge(book);
+  renderChapterSidebar(book);
+  viewChapter(book, added[0].id);
+  toast(`Imported ${added.length} chapter${added.length !== 1 ? 's' : ''}` +
+    (unmatched ? ` — ${unmatched} local image${unmatched !== 1 ? 's' : ''} not found. Select images together with the .md files to include them.` : '.'));
+  gcImages();
 }
 
 // ── Library View ───────────────────────────
 function renderLibrary() {
-  const grid = document.getElementById('library-grid');
-  const empty = document.getElementById('empty-state');
+  const grid = $('library-grid');
+  const empty = $('empty-state');
   grid.querySelectorAll('.book-card').forEach(el => el.remove());
 
   if (state.books.length === 0) {
@@ -95,29 +541,34 @@ function renderLibrary() {
 
   state.books.forEach(book => {
     const counts = chapterCounts(book);
+    const title = escHtml(book.title);
     const card = document.createElement('div');
     card.className = 'book-card';
     card.dataset.id = book.id;
 
     card.innerHTML = `
       <div class="book-cover-wrap">
-        ${book.cover
-          ? `<img class="book-cover-img" src="${book.cover}" alt="${escHtml(book.title)}" />`
-          : `<div class="book-cover-placeholder">📖</div>`}
+        <div class="book-cover-open" role="button" tabindex="0" aria-label="Open ${title}">
+          ${book.coverId
+            ? `<img class="book-cover-img" data-img-id="${escHtml(book.coverId)}" alt="" />`
+            : `<div class="book-cover-placeholder">📖</div>`}
+        </div>
         <div class="book-card-menu">
-          <button class="btn-edit-meta" title="Edit">✎</button>
-          <button class="btn-del" title="Delete">✕</button>
+          <button class="btn-edit-meta" title="Edit details" aria-label="Edit ${title}">✎</button>
+          <button class="btn-del" title="Delete book" aria-label="Delete ${title}">✕</button>
         </div>
       </div>
       <div class="book-card-info">
-        <div class="book-card-title">${escHtml(book.title)}</div>
+        <div class="book-card-title">${title}</div>
         <div class="book-card-meta">${counts.regular} chapter${counts.regular !== 1 ? 's' : ''}${counts.info > 0 ? ` · Informational: ${counts.info}` : ''}</div>
+        ${book.description ? `<div class="book-card-desc">${escHtml(book.description)}</div>` : ''}
       </div>
     `;
 
-    card.querySelector('.book-cover-wrap').addEventListener('click', e => {
-      if (e.target.closest('.book-card-menu')) return;
-      openBook(book.id);
+    const opener = card.querySelector('.book-cover-open');
+    opener.addEventListener('click', () => openBook(book.id));
+    opener.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openBook(book.id); }
     });
     card.querySelector('.book-card-title').addEventListener('click', () => openBook(book.id));
     card.querySelector('.btn-edit-meta').addEventListener('click', e => {
@@ -126,37 +577,46 @@ function renderLibrary() {
     });
     card.querySelector('.btn-del').addEventListener('click', e => {
       e.stopPropagation();
-      confirmDelete(`Delete "${book.title}"? All chapters will be lost.`, () => {
+      confirmDelete(`Delete "${book.title}"? All chapters will be lost.`, async () => {
         state.books = state.books.filter(b => b.id !== book.id);
-        save();
+        await save();
         renderLibrary();
         toast('Book deleted.');
+        gcImages();
       });
     });
 
     grid.appendChild(card);
+    hydrateImages(card);
   });
 }
 
 // ── Book View ──────────────────────────────
+function showWelcome(book) {
+  $('chapter-area').innerHTML = `
+    <div class="chapter-welcome" id="chapter-welcome">
+      <div>
+        ${book.description ? `<p class="book-description">${escHtml(book.description)}</p>` : ''}
+        <p>Select a chapter to read,<br>or create a new one.</p>
+      </div>
+    </div>`;
+}
+
 function openBook(id) {
   state.currentBookId = id;
   state.currentChapterId = null;
   const book = bookById(id);
-  document.getElementById('book-title-display').textContent = book.title;
+  $('book-title-display').textContent = book.title;
   updateChapterBadge(book);
   renderChapterSidebar(book);
-  document.getElementById('chapter-area').innerHTML = `
-    <div class="chapter-welcome" id="chapter-welcome">
-      <p>Select a chapter to read,<br>or create a new one.</p>
-    </div>`;
+  showWelcome(book);
   showView('view-book');
 }
 
 function updateChapterBadge(book) {
   const counts = chapterCounts(book);
-  document.getElementById('book-chapter-count').textContent = `${counts.regular} chapter${counts.regular !== 1 ? 's' : ''}`;
-  const infoBadge = document.getElementById('book-info-count');
+  $('book-chapter-count').textContent = `${counts.regular} chapter${counts.regular !== 1 ? 's' : ''}`;
+  const infoBadge = $('book-info-count');
   if (counts.info > 0) {
     infoBadge.textContent = `Informational: ${counts.info}`;
     infoBadge.style.display = '';
@@ -166,35 +626,40 @@ function updateChapterBadge(book) {
 }
 
 function renderChapterSidebar(book) {
-  const list = document.getElementById('chapter-list');
+  const list = $('chapter-list');
   list.innerHTML = '';
   book.chapters.forEach((ch, idx) => {
     const li = document.createElement('li');
     li.innerHTML = `
-      <button class="chapter-list-btn" data-id="${ch.id}">${idx + 1}. ${escHtml(ch.title)}${ch.isInfo ? '<span class="info-tag">INFO</span>' : ''}</button>
+      <button class="chapter-list-btn" data-id="${escHtml(ch.id)}">${idx + 1}. ${escHtml(ch.title)}${ch.isInfo ? '<span class="info-tag">INFO</span>' : ''}</button>
       <div class="chapter-item-actions">
-        <button class="btn-ch-edit" title="Edit">✎</button>
-        <button class="btn-del" title="Delete">✕</button>
+        <button class="btn-ch-edit" title="Edit chapter" aria-label="Edit chapter ${escHtml(ch.title)}">✎</button>
+        <button class="btn-del" title="Delete chapter" aria-label="Delete chapter ${escHtml(ch.title)}">✕</button>
       </div>
     `;
     li.querySelector('.chapter-list-btn').addEventListener('click', () => viewChapter(book, ch.id));
     li.querySelector('.btn-ch-edit').addEventListener('click', () => openEditor(book.id, ch.id));
     li.querySelector('.btn-del').addEventListener('click', () => {
-      confirmDelete(`Delete chapter "${ch.title}"?`, () => {
+      confirmDelete(`Delete chapter "${ch.title}"?`, async () => {
         book.chapters = book.chapters.filter(c => c.id !== ch.id);
-        save();
+        await save();
         updateChapterBadge(book);
         renderChapterSidebar(book);
         if (state.currentChapterId === ch.id) {
           state.currentChapterId = null;
-          document.getElementById('chapter-area').innerHTML = `
-            <div class="chapter-welcome"><p>Select a chapter to read,<br>or create a new one.</p></div>`;
+          showWelcome(book);
         }
         toast('Chapter deleted.');
+        gcImages();
       });
     });
     list.appendChild(li);
   });
+  if (state.currentChapterId) {
+    list.querySelectorAll('.chapter-list-btn').forEach(b => {
+      b.classList.toggle('active', b.dataset.id === state.currentChapterId);
+    });
+  }
 }
 
 function viewChapter(book, chId) {
@@ -203,54 +668,78 @@ function viewChapter(book, chId) {
   document.querySelectorAll('.chapter-list-btn').forEach(b => {
     b.classList.toggle('active', b.dataset.id === chId);
   });
-  const area = document.getElementById('chapter-area');
+  const area = $('chapter-area');
   area.innerHTML = `
     <div class="chapter-reader">
       <h2 class="chapter-reader-title">${escHtml(ch.title)}${ch.isInfo ? '<span class="info-tag" style="margin-left:10px;vertical-align:4px;">INFO</span>' : ''}</h2>
       <div class="md-content">${parseMarkdown(ch.content || '')}</div>
     </div>`;
+  area.scrollTop = 0;
+  hydrateImages(area);
 }
 
 // ── Editor ─────────────────────────────────
+function setEditorMode(mode) {
+  const ta = $('editor-textarea');
+  const pv = $('editor-preview');
+  if (mode === 'preview') {
+    pv.innerHTML = `<div class="md-content">${parseMarkdown(ta.value)}</div>`;
+    hydrateImages(pv);
+    pv.classList.remove('hidden');
+    ta.classList.add('hidden');
+    $('btn-toggle-preview').textContent = 'Edit';
+  } else {
+    pv.classList.add('hidden');
+    ta.classList.remove('hidden');
+    $('btn-toggle-preview').textContent = 'Preview';
+  }
+  state.editorMode = mode;
+}
+
 function openEditor(bookId, chapterId) {
   state.currentBookId = bookId;
   state.currentChapterId = chapterId;
   const book = bookById(bookId);
   const ch = chapterId ? chapterById(book, chapterId) : null;
 
-  document.getElementById('editor-chapter-title').value = ch ? ch.title : '';
-  document.getElementById('editor-textarea').value = ch ? ch.content : '';
-  document.getElementById('editor-is-info').checked = ch ? !!ch.isInfo : false;
-  document.getElementById('editor-preview').innerHTML = '';
-  document.getElementById('editor-preview').classList.add('hidden');
-  document.getElementById('editor-textarea').classList.remove('hidden');
-  document.getElementById('btn-toggle-preview').textContent = 'Preview';
-  state.editorMode = 'write';
+  $('editor-chapter-title').value = ch ? ch.title : '';
+  $('editor-textarea').value = ch ? ch.content : '';
+  $('editor-is-info').checked = ch ? !!ch.isInfo : false;
+  $('editor-preview').innerHTML = '';
+  setEditorMode('write');
+  editorDirty = false;
+  pendingImageIds.clear();
 
   showView('view-editor');
 }
 
-document.getElementById('btn-toggle-preview').addEventListener('click', () => {
-  const ta = document.getElementById('editor-textarea');
-  const pv = document.getElementById('editor-preview');
-  if (state.editorMode === 'write') {
-    pv.innerHTML = `<div class="md-content">${parseMarkdown(ta.value)}</div>`;
-    pv.classList.remove('hidden');
-    ta.classList.add('hidden');
-    document.getElementById('btn-toggle-preview').textContent = 'Edit';
-    state.editorMode = 'preview';
-  } else {
-    pv.classList.add('hidden');
-    ta.classList.remove('hidden');
-    document.getElementById('btn-toggle-preview').textContent = 'Preview';
-    state.editorMode = 'write';
+function leaveEditor() {
+  editorDirty = false;
+  pendingImageIds.clear();
+  openBook(state.currentBookId);
+  gcImages();
+}
+
+['editor-chapter-title', 'editor-textarea', 'editor-is-info'].forEach(id => {
+  $(id).addEventListener('input', () => { editorDirty = true; });
+  $(id).addEventListener('change', () => { editorDirty = true; });
+});
+
+window.addEventListener('beforeunload', e => {
+  if (editorDirty && $('view-editor').classList.contains('active')) {
+    e.preventDefault();
+    e.returnValue = '';
   }
 });
 
-document.getElementById('btn-save-chapter').addEventListener('click', () => {
-  const title = document.getElementById('editor-chapter-title').value.trim() || 'Untitled Chapter';
-  const content = document.getElementById('editor-textarea').value;
-  const isInfo = document.getElementById('editor-is-info').checked;
+$('btn-toggle-preview').addEventListener('click', () => {
+  setEditorMode(state.editorMode === 'write' ? 'preview' : 'write');
+});
+
+$('btn-save-chapter').addEventListener('click', async () => {
+  const title = $('editor-chapter-title').value.trim() || 'Untitled Chapter';
+  const content = $('editor-textarea').value;
+  const isInfo = $('editor-is-info').checked;
   const book = bookById(state.currentBookId);
 
   if (state.currentChapterId) {
@@ -263,139 +752,245 @@ document.getElementById('btn-save-chapter').addEventListener('click', () => {
     book.chapters.push(newCh);
     state.currentChapterId = newCh.id;
   }
-  save();
+  if (!(await save())) return;   // stay in the editor so nothing is lost
+  const savedChapterId = state.currentChapterId;   // openBook() below resets state.currentChapterId
+  editorDirty = false;
+  pendingImageIds.clear();
   toast('Chapter saved.');
   openBook(state.currentBookId);
-  viewChapter(book, state.currentChapterId);
+  viewChapter(book, savedChapterId);
+  gcImages();
 });
 
-document.getElementById('btn-back-book').addEventListener('click', () => {
-  openBook(state.currentBookId);
+$('btn-back-book').addEventListener('click', () => {
+  if (!editorDirty) { leaveEditor(); return; }
+  confirmAction({
+    title: 'Discard changes?',
+    message: 'This chapter has unsaved changes.',
+    okLabel: 'Discard',
+  }, leaveEditor);
+});
+
+// Chapter pictures: button, paste and drag-and-drop all end up here.
+function insertAtCursor(ta, text) {
+  ta.focus();
+  ta.setRangeText(text, ta.selectionStart, ta.selectionEnd, 'end');
+  ta.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+async function addImagesToEditor(fileList) {
+  const images = [...fileList].filter(f => f.type && f.type.startsWith('image/'));
+  if (images.length === 0) return;
+  if (state.editorMode === 'preview') setEditorMode('write');
+  const ta = $('editor-textarea');
+  let added = 0;
+  for (const f of images) {
+    try {
+      const id = await storeImage(f);
+      const alt = f.name.replace(/\.[^.]+$/, '').replace(/[\[\]()]/g, '').trim() || 'image';
+      insertAtCursor(ta, `\n\n![${alt}](img:${id})\n\n`);
+      added++;
+    } catch (err) {
+      console.error(err);
+      toast(`Couldn't add ${f.name}.`);
+    }
+  }
+  if (added) toast(`Added ${added} picture${added !== 1 ? 's' : ''}.`);
+}
+
+$('btn-add-image').addEventListener('click', () => $('input-chapter-image').click());
+$('input-chapter-image').addEventListener('change', e => {
+  const files = [...e.target.files];
+  e.target.value = '';
+  addImagesToEditor(files);
+});
+$('editor-textarea').addEventListener('paste', e => {
+  const files = [...(e.clipboardData ? e.clipboardData.files : [])].filter(f => f.type.startsWith('image/'));
+  if (files.length) { e.preventDefault(); addImagesToEditor(files); }
+});
+$('editor-textarea').addEventListener('dragover', e => {
+  if (e.dataTransfer && [...e.dataTransfer.types].includes('Files')) e.preventDefault();
+});
+$('editor-textarea').addEventListener('drop', e => {
+  const files = [...(e.dataTransfer ? e.dataTransfer.files : [])].filter(f => f.type.startsWith('image/'));
+  if (files.length) { e.preventDefault(); addImagesToEditor(files); }
+});
+
+// ── Import .md ─────────────────────────────
+$('btn-import-md').addEventListener('click', () => $('input-import-md').click());
+$('input-import-md').addEventListener('change', e => {
+  const files = [...e.target.files];
+  e.target.value = '';
+  importMarkdownFiles(files);
 });
 
 // ── Book Modal ─────────────────────────────
-let pendingCover = null;
+// pendingCover: undefined = unchanged, null = remove cover, string = new image id
+let pendingCover;
 
-function openBookModal(bookId) {
-  state.editingBookId = bookId || null;
-  pendingCover = null;
-  const book = bookId ? bookById(bookId) : null;
-
-  document.getElementById('modal-book-title').textContent = book ? 'Edit Book' : 'New Book';
-  document.getElementById('input-book-title').value = book ? book.title : '';
-
-  const preview = document.getElementById('cover-preview');
-  const placeholder = document.getElementById('cover-placeholder');
-  if (book && book.cover) {
-    preview.src = book.cover;
+async function showCoverPreview(imageId) {
+  const preview = $('cover-preview');
+  const placeholder = $('cover-placeholder');
+  const url = imageId ? await imageUrl(imageId) : null;
+  if (url) {
+    preview.src = url;
     preview.classList.remove('hidden');
     placeholder.style.display = 'none';
   } else {
+    preview.removeAttribute('src');
     preview.classList.add('hidden');
     placeholder.style.display = '';
   }
-
-  document.getElementById('modal-book').classList.remove('hidden');
-  document.getElementById('input-book-title').focus();
+  $('btn-remove-cover').classList.toggle('hidden', !url);
 }
 
-document.getElementById('btn-new-book').addEventListener('click', () => openBookModal(null));
-document.getElementById('btn-edit-book-meta').addEventListener('click', () => openBookModal(state.currentBookId));
+function openBookModal(bookId) {
+  state.editingBookId = bookId || null;
+  pendingCover = undefined;
+  pendingImageIds.clear();
+  const book = bookId ? bookById(bookId) : null;
 
-document.getElementById('btn-modal-cancel').addEventListener('click', closeBookModal);
-document.getElementById('btn-modal-save').addEventListener('click', saveBook);
+  $('modal-book-title').textContent = book ? 'Edit Book' : 'New Book';
+  $('input-book-title').value = book ? book.title : '';
+  $('input-book-description').value = book ? (book.description || '') : '';
+  showCoverPreview(book ? book.coverId : null);
 
-document.getElementById('modal-book').addEventListener('click', e => {
+  $('modal-book').classList.remove('hidden');
+  $('input-book-title').focus();
+}
+
+$('btn-new-book').addEventListener('click', () => openBookModal(null));
+$('btn-edit-book-meta').addEventListener('click', () => openBookModal(state.currentBookId));
+
+$('btn-modal-cancel').addEventListener('click', closeBookModal);
+$('btn-modal-save').addEventListener('click', saveBook);
+
+$('modal-book').addEventListener('click', e => {
   if (e.target === e.currentTarget) closeBookModal();
 });
 
 function closeBookModal() {
-  document.getElementById('modal-book').classList.add('hidden');
+  $('modal-book').classList.add('hidden');
+  const hadUnsavedUpload = pendingImageIds.size > 0;
+  pendingImageIds.clear();
+  pendingCover = undefined;
+  if (hadUnsavedUpload) gcImages();
 }
 
-function saveBook() {
-  const title = document.getElementById('input-book-title').value.trim();
+async function saveBook() {
+  const title = $('input-book-title').value.trim();
   if (!title) { toast('Please enter a title.'); return; }
+  const description = $('input-book-description').value.trim();
+  let book;
 
   if (state.editingBookId) {
-    const book = bookById(state.editingBookId);
+    book = bookById(state.editingBookId);
     book.title = title;
-    if (pendingCover !== null) book.cover = pendingCover;
-    save();
-    toast('Book updated.');
-    if (document.getElementById('view-book').classList.contains('active')) {
-      document.getElementById('book-title-display').textContent = title;
-    }
+    book.description = description;
+    if (pendingCover !== undefined) book.coverId = pendingCover;
   } else {
-    const newBook = { id: uid(), title, cover: pendingCover || null, chapters: [] };
-    state.books.push(newBook);
-    save();
-    toast('Book created.');
+    book = { id: uid(), title, description, coverId: pendingCover || null, chapters: [] };
+    state.books.push(book);
   }
+  if (!(await save())) return;
+  toast(state.editingBookId ? 'Book updated.' : 'Book created.');
 
-  closeBookModal();
+  if ($('view-book').classList.contains('active') && state.currentBookId === book.id) {
+    $('book-title-display').textContent = title;
+    if (!state.currentChapterId) showWelcome(book);
+  }
+  $('modal-book').classList.add('hidden');
+  pendingImageIds.clear();
+  pendingCover = undefined;
   renderLibrary();
+  gcImages();   // drops the old cover if it was replaced or removed
 }
 
-document.getElementById('cover-upload-area').addEventListener('click', () => {
-  document.getElementById('input-cover').click();
+$('cover-upload-area').addEventListener('click', () => $('input-cover').click());
+$('cover-upload-area').addEventListener('keydown', e => {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('input-cover').click(); }
 });
-document.getElementById('input-cover').addEventListener('change', e => {
+$('input-cover').addEventListener('change', async e => {
   const file = e.target.files[0];
+  e.target.value = '';
   if (!file) return;
-  const reader = new FileReader();
-  reader.onload = ev => {
-    pendingCover = ev.target.result;
-    const preview = document.getElementById('cover-preview');
-    preview.src = pendingCover;
-    preview.classList.remove('hidden');
-    document.getElementById('cover-placeholder').style.display = 'none';
-  };
-  reader.readAsDataURL(file);
+  try {
+    const id = await storeImage(file, 1200);
+    pendingCover = id;
+    showCoverPreview(id);
+  } catch (err) {
+    console.error(err);
+    toast("Couldn't use that file — pick a PNG, JPG or WEBP image.");
+  }
+});
+$('btn-remove-cover').addEventListener('click', () => {
+  pendingCover = null;
+  showCoverPreview(null);
 });
 
-// ── Confirm Delete Modal ───────────────────
-function confirmDelete(msg, fn) {
+// ── Confirm Modal ──────────────────────────
+function confirmAction({ title = 'Delete?', message = 'This action cannot be undone.', okLabel = 'Delete' }, fn) {
   state.pendingDeleteFn = fn;
-  document.getElementById('confirm-message').textContent = msg;
-  document.getElementById('modal-confirm').classList.remove('hidden');
+  $('confirm-title').textContent = title;
+  $('confirm-message').textContent = message;
+  $('btn-confirm-ok').textContent = okLabel;
+  $('modal-confirm').classList.remove('hidden');
+  $('btn-confirm-cancel').focus();
 }
-document.getElementById('btn-confirm-cancel').addEventListener('click', () => {
-  document.getElementById('modal-confirm').classList.add('hidden');
+function confirmDelete(msg, fn) { confirmAction({ message: msg }, fn); }
+
+function closeConfirm() {
+  $('modal-confirm').classList.add('hidden');
   state.pendingDeleteFn = null;
+}
+$('btn-confirm-cancel').addEventListener('click', closeConfirm);
+$('btn-confirm-ok').addEventListener('click', () => {
+  const fn = state.pendingDeleteFn;
+  closeConfirm();
+  if (fn) fn();
 });
-document.getElementById('btn-confirm-ok').addEventListener('click', () => {
-  document.getElementById('modal-confirm').classList.add('hidden');
-  if (state.pendingDeleteFn) { state.pendingDeleteFn(); state.pendingDeleteFn = null; }
-});
-document.getElementById('modal-confirm').addEventListener('click', e => {
-  if (e.target === e.currentTarget) {
-    document.getElementById('modal-confirm').classList.add('hidden');
-    state.pendingDeleteFn = null;
-  }
+$('modal-confirm').addEventListener('click', e => {
+  if (e.target === e.currentTarget) closeConfirm();
 });
 
 // ── Navigation ─────────────────────────────
-document.getElementById('btn-back-library').addEventListener('click', () => {
+$('btn-back-library').addEventListener('click', () => {
   state.currentBookId = null;
   renderLibrary();
   showView('view-library');
 });
-document.getElementById('btn-new-chapter').addEventListener('click', () => {
+$('btn-new-chapter').addEventListener('click', () => {
   openEditor(state.currentBookId, null);
 });
 
-// ── Keyboard shortcut: Ctrl/Cmd+S to save ─
+// ── Keyboard shortcuts ─────────────────────
 document.addEventListener('keydown', e => {
-  if ((e.ctrlKey || e.metaKey) && e.key === 's') {
-    if (document.getElementById('view-editor').classList.contains('active')) {
+  // Ctrl/Cmd+S saves the chapter
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+    if ($('view-editor').classList.contains('active')) {
       e.preventDefault();
-      document.getElementById('btn-save-chapter').click();
+      $('btn-save-chapter').click();
     }
+  }
+  // Esc closes whichever dialog is open
+  if (e.key === 'Escape') {
+    if (!$('modal-confirm').classList.contains('hidden')) closeConfirm();
+    else if (!$('modal-book').classList.contains('hidden')) closeBookModal();
+  }
+  // Enter in the book title field saves the book
+  if (e.key === 'Enter' && e.target.id === 'input-book-title') {
+    e.preventDefault();
+    saveBook();
   }
 });
 
 // ── Init ───────────────────────────────────
-load();
-renderLibrary();
-showView('view-library');
+(async function init() {
+  $('library-grid').style.visibility = 'hidden';   // avoid flashing the empty state while loading
+  await load();
+  renderLibrary();
+  $('library-grid').style.visibility = '';
+  showView('view-library');
+  if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+  gcImages();
+})();

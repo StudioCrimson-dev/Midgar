@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>My Library</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400&family=Crimson+Pro:ital,wght@0,300;0,400;1,300&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css" />
 </head>
@@ -42,7 +43,11 @@
       </div>
       <div class="book-header-actions">
         <button class="btn-secondary" id="btn-edit-book-meta">Edit Details</button>
+        <button class="btn-secondary" id="btn-import-md" title="Import Markdown files as chapters">Import .md</button>
         <button class="btn-primary" id="btn-new-chapter">+ Chapter</button>
+        <!-- Markdown files, plus any images they reference (matched by file name) -->
+        <input type="file" id="input-import-md" class="hidden-file" multiple
+               accept=".md,.markdown,.mdown,.txt,text/markdown,text/plain,image/*" />
       </div>
     </header>
 
@@ -66,40 +71,47 @@
   <div id="view-editor" class="view">
     <header class="editor-header">
       <button class="btn-back" id="btn-back-book">← Back</button>
-      <input type="text" id="editor-chapter-title" class="editor-title-input" placeholder="Chapter Title…" />
+      <input type="text" id="editor-chapter-title" class="editor-title-input" placeholder="Chapter Title…" aria-label="Chapter title" />
       <label class="info-checkbox-label">
         <input type="checkbox" id="editor-is-info" />
         <span>This is an information chapter</span>
       </label>
       <div class="editor-actions">
+        <button class="btn-secondary" id="btn-add-image" type="button" title="Insert pictures (you can also paste or drop them into the text)">+ Image</button>
+        <input type="file" id="input-chapter-image" class="hidden-file" accept="image/*" multiple />
         <button class="btn-secondary toggle-preview" id="btn-toggle-preview">Preview</button>
         <button class="btn-primary" id="btn-save-chapter">Save</button>
       </div>
     </header>
     <div class="editor-body">
-      <textarea id="editor-textarea" placeholder="Begin writing… Markdown is supported.&#10;&#10;# Heading&#10;**bold**, *italic*, > blockquote"></textarea>
+      <textarea id="editor-textarea" aria-label="Chapter text" placeholder="Begin writing… Markdown is supported.&#10;&#10;# Heading&#10;**bold**, *italic*, > blockquote&#10;&#10;Paste or drop a picture here to add it."></textarea>
       <div id="editor-preview" class="editor-preview hidden"></div>
     </div>
   </div>
 
   <!-- ───── MODAL: New / Edit Book ───── -->
-  <div id="modal-book" class="modal-overlay hidden">
+  <div id="modal-book" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="modal-book-title">
     <div class="modal">
       <h2 class="modal-title" id="modal-book-title">New Book</h2>
       <div class="modal-body">
         <label>Title
-          <input type="text" id="input-book-title" placeholder="Enter book title…" />
+          <input type="text" id="input-book-title" placeholder="Enter book title…" maxlength="200" />
         </label>
-        <label>Cover Art
-          <div class="cover-upload-area" id="cover-upload-area">
+        <label>Description
+          <textarea id="input-book-description" rows="4" maxlength="1000" placeholder="What is this book about? (optional)"></textarea>
+        </label>
+        <div class="field">
+          <span class="field-label">Cover Art</span>
+          <div class="cover-upload-area" id="cover-upload-area" role="button" tabindex="0" aria-label="Choose cover image">
             <img id="cover-preview" class="cover-preview hidden" alt="Cover preview" />
             <div class="cover-placeholder" id="cover-placeholder">
               <span>Click to upload image</span>
               <small>PNG, JPG, WEBP</small>
             </div>
-            <input type="file" id="input-cover" accept="image/*" class="hidden-file" />
           </div>
-        </label>
+          <input type="file" id="input-cover" accept="image/*" class="hidden-file" />
+          <button type="button" class="btn-ghost btn-remove-cover hidden" id="btn-remove-cover">Remove cover</button>
+        </div>
       </div>
       <div class="modal-footer">
         <button class="btn-ghost" id="btn-modal-cancel">Cancel</button>
@@ -108,10 +120,10 @@
     </div>
   </div>
 
-  <!-- ───── MODAL: Confirm Delete ───── -->
-  <div id="modal-confirm" class="modal-overlay hidden">
+  <!-- ───── MODAL: Confirm ───── -->
+  <div id="modal-confirm" class="modal-overlay hidden" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-message">
     <div class="modal modal-sm">
-      <h2 class="modal-title">Delete?</h2>
+      <h2 class="modal-title" id="confirm-title">Delete?</h2>
       <p class="modal-body" id="confirm-message">This action cannot be undone.</p>
       <div class="modal-footer">
         <button class="btn-ghost" id="btn-confirm-cancel">Cancel</button>
@@ -121,7 +133,7 @@
   </div>
 
   <!-- ───── TOAST ───── -->
-  <div id="toast" class="toast hidden"></div>
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
   <script src="app.js"></script>
 </body>
