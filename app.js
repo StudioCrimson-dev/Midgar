@@ -1,7 +1,9 @@
 /* ─────────────────────────────────────────────
-   MY LIBRARY — app.js
-   Storage: IndexedDB (text + images)  |  No dependencies
+   MIDGAR — app.js
+   Storage: IndexedDB (local to this browser)
 ───────────────────────────────────────────── */
+(function () {
+'use strict';
 
 const $ = id => document.getElementById(id);
 
@@ -14,98 +16,66 @@ let state = {
   editingBookId: null,
   pendingDeleteFn: null,
 };
-let editorDirty = false;            // unsaved changes in the chapter editor
-let storageReady = false;           // true once the library loaded from IndexedDB
-const pendingImageIds = new Set();  // images uploaded but not yet saved into a book/chapter
+let editorDirty = false;              // unsaved changes in the chapter editor
+const pendingUploadIds = new Set();   // images stored this editing/modal session but not yet committed to a saved chapter/book
 
-// ── Storage (IndexedDB) ────────────────────
-// 'kv'     → key "books": the whole library as plain JSON (titles, descriptions, chapter text)
-// 'images' → key <imageId>: image Blobs (covers + chapter pictures)
-// Chapter text refers to pictures as ![alt](img:<imageId>), so the text stays portable.
-const DB_NAME = 'mylibrary-db';
+// ── IndexedDB data layer ────────────────────
+// Object stores:
+//   books    (keyPath: id)            → title, description, coverId, order, chapterCount, infoCount
+//   chapters (keyPath: id, idx bookId) → bookId, title, content, isInfo, order
+//   images   (keyPath: id)             → blob, type
+// Chapter text refers to pictures as ![alt](img:<imageId>); the image bytes live in the
+// "images" store, so the chapter text itself stays a plain, portable string.
+const DB_NAME = 'midgar-db';
+const DB_VERSION = 1;
 let dbPromise = null;
 
-function openDb() {
-  if (!dbPromise) {
-    dbPromise = new Promise((resolve, reject) => {
-      const req = indexedDB.open(DB_NAME, 1);
-      req.onupgradeneeded = () => {
-        req.result.createObjectStore('kv');
-        req.result.createObjectStore('images');
-      };
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
-    });
-  }
+function openDB() {
+  if (dbPromise) return dbPromise;
+  dbPromise = new Promise((resolve, reject) => {
+    if (!window.indexedDB) { reject(new Error('IndexedDB is not available in this browser.')); return; }
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = () => {
+      const idb = req.result;
+      if (!idb.objectStoreNames.contains('books')) idb.createObjectStore('books', { keyPath: 'id' });
+      if (!idb.objectStoreNames.contains('chapters')) {
+        const store = idb.createObjectStore('chapters', { keyPath: 'id' });
+        store.createIndex('bookId', 'bookId');
+      }
+      if (!idb.objectStoreNames.contains('images')) idb.createObjectStore('images', { keyPath: 'id' });
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
   return dbPromise;
 }
 
-function idbRequest(store, mode, run) {
-  return openDb().then(db => new Promise((resolve, reject) => {
-    const tx = db.transaction(store, mode);
-    const req = run(tx.objectStore(store));
-    tx.oncomplete = () => resolve(req.result);
-    tx.onerror = tx.onabort = () => reject(tx.error);
-  }));
+function reqToPromise(req) {
+  return new Promise((resolve, reject) => {
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
 }
 
-const idb = {
-  get:  (store, key)      => idbRequest(store, 'readonly',  s => s.get(key)),
-  put:  (store, key, val) => idbRequest(store, 'readwrite', s => s.put(val, key)),
-  del:  (store, key)      => idbRequest(store, 'readwrite', s => s.delete(key)),
-  keys: store             => idbRequest(store, 'readonly',  s => s.getAllKeys()),
-};
-
-// Saves are queued so they always land in order. Resolves to true/false and
-// shows an error toast on failure, so callers can decide whether to carry on.
-let saveChain = Promise.resolve();
-function save() {
-  const snapshot = JSON.parse(JSON.stringify(state.books));
-  const p = saveChain
-    .then(() => idb.put('kv', 'books', snapshot))
-    .then(() => true, err => {
-      console.error(err);
-      toast('Could not save — browser storage error.');
-      return false;
-    });
-  saveChain = p;
-  return p;
+async function idbGet(store, key) {
+  const idb = await openDB();
+  return reqToPromise(idb.transaction(store, 'readonly').objectStore(store).get(key));
 }
-
-async function load() {
-  try {
-    const stored = await idb.get('kv', 'books');
-    if (Array.isArray(stored)) state.books = stored;
-    else await migrateFromLocalStorage();
-    state.books.forEach(b => {
-      b.description = b.description || '';
-      b.chapters = b.chapters || [];
-    });
-    storageReady = true;
-  } catch (err) {
-    console.error(err);
-    toast('Storage is unavailable — changes will not be saved.');
-  }
+async function idbGetAll(store) {
+  const idb = await openDB();
+  return reqToPromise(idb.transaction(store, 'readonly').objectStore(store).getAll());
 }
-
-// One-time move from the old localStorage format. The old entry is left in
-// place as a backup; delete the "mylibrary" key yourself once you're happy.
-async function migrateFromLocalStorage() {
-  let old = null;
-  try { old = JSON.parse(localStorage.getItem('mylibrary')); } catch { /* ignore */ }
-  if (!Array.isArray(old) || old.length === 0) return;
-  for (const b of old) {
-    if (typeof b.cover === 'string' && b.cover.startsWith('data:')) {
-      try {
-        const id = uid();
-        await idb.put('images', id, dataUrlToBlob(b.cover));
-        b.coverId = id;
-      } catch (err) { console.error('Cover migration failed', err); }
-    }
-    delete b.cover;
-  }
-  state.books = old;
-  await save();
+async function idbGetAllByIndex(store, indexName, key) {
+  const idb = await openDB();
+  return reqToPromise(idb.transaction(store, 'readonly').objectStore(store).index(indexName).getAll(key));
+}
+async function idbPut(store, value) {
+  const idb = await openDB();
+  return reqToPromise(idb.transaction(store, 'readwrite').objectStore(store).put(value));
+}
+async function idbDelete(store, key) {
+  const idb = await openDB();
+  return reqToPromise(idb.transaction(store, 'readwrite').objectStore(store).delete(key));
 }
 
 // ── Helpers ────────────────────────────────
@@ -127,9 +97,16 @@ function showView(id) {
 function bookById(id) { return state.books.find(b => b.id === id); }
 function chapterById(book, id) { return book.chapters.find(c => c.id === id); }
 
+// Uses the exact loaded chapter list when available (the open book), otherwise
+// the counts denormalized onto the book doc (the library view, before it's opened).
 function chapterCounts(book) {
-  const total = book.chapters.length;
-  const info = book.chapters.filter(c => c.isInfo).length;
+  if (Array.isArray(book.chapters)) {
+    const total = book.chapters.length;
+    const info = book.chapters.filter(c => c.isInfo).length;
+    return { regular: total - info, info, total };
+  }
+  const total = book.chapterCount || 0;
+  const info = book.infoCount || 0;
   return { regular: total - info, info, total };
 }
 
@@ -152,19 +129,17 @@ function readText(file) {
   });
 }
 
-// ── Images ─────────────────────────────────
-function dataUrlToBlob(url) {
-  const [head, data] = url.split(',');
-  const mime = (head.match(/^data:([^;,]+)/) || [])[1] || 'application/octet-stream';
-  const bin = atob(data);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return new Blob([bytes], { type: mime });
+function friendlyError(err) {
+  console.error(err);
+  if (err && err.name === 'QuotaExceededError') return 'Storage is full — free up space on this device and try again.';
+  if (err && /IndexedDB is not available/i.test(err.message || '')) return "This browser doesn't support local storage in this context (e.g. private browsing can block it).";
+  return "Something went wrong saving that locally — please try again.";
 }
 
-// Shrinks big photos so the library stays small. GIFs and SVGs are kept as-is
+// ── Images ─────────────────────────────────
+// Shrinks big photos so uploads stay small. GIFs and SVGs are kept as-is
 // (re-encoding would flatten animation / rasterise vectors). Whichever is
-// smaller — the original or the re-encoded copy — is what gets stored.
+// smaller — the original or the re-encoded copy — is what gets uploaded.
 async function prepareImage(file, maxDim = 1600) {
   if (!file.type || !file.type.startsWith('image/')) throw new Error('Not an image');
   if (file.type === 'image/gif' || file.type === 'image/svg+xml') return file;
@@ -180,32 +155,41 @@ async function prepareImage(file, maxDim = 1600) {
     const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/webp', 0.85));
     return blob && blob.size < file.size ? blob : file;
   } catch {
-    return file;   // couldn't decode/resize — store the original
+    return file;   // couldn't decode/resize — upload the original
   }
 }
 
+// Stores the image's bytes in IndexedDB and marks the new id as "pending" (stored but
+// not yet referenced by a saved chapter/book) until the caller commits or discards it.
 async function storeImage(file, maxDim) {
   const blob = await prepareImage(file, maxDim);
   const id = uid();
-  pendingImageIds.add(id);   // protect from cleanup until it's saved into something
-  await idb.put('images', id, blob);
+  pendingUploadIds.add(id);
+  await idbPut('images', { id, blob, type: blob.type || file.type || 'application/octet-stream' });
   return id;
 }
 
-// id → Promise<objectURL>. Cached so each image is read from the DB once.
+// id → Promise<blob: URL>. Cached so each image's bytes are only read out of
+// IndexedDB once; the object URL is revoked when the image is deleted.
 const urlCache = new Map();
 function imageUrl(id) {
   if (!id) return Promise.resolve(null);
   if (!urlCache.has(id)) {
-    urlCache.set(id, (async () => {
-      try {
-        const blob = await idb.get('images', id);
-        if (!blob) { urlCache.delete(id); return null; }
-        return URL.createObjectURL(blob);
-      } catch { urlCache.delete(id); return null; }
-    })());
+    urlCache.set(id, idbGet('images', id)
+      .then(rec => rec ? URL.createObjectURL(rec.blob) : null)
+      .catch(() => { urlCache.delete(id); return null; }));
   }
   return urlCache.get(id);
+}
+
+// Deletes an image's bytes from IndexedDB and revokes its cached object URL, if any.
+async function deleteImage(id) {
+  const cached = urlCache.get(id);
+  if (cached) {
+    cached.then(url => { if (url) URL.revokeObjectURL(url); }).catch(() => {});
+    urlCache.delete(id);
+  }
+  try { await idbDelete('images', id); } catch (err) { console.error(err); }
 }
 
 // Fills in <img data-img-id="…"> elements that the markdown renderer produced.
@@ -218,31 +202,23 @@ async function hydrateImages(root) {
   }));
 }
 
-function usedImageIds() {
-  const used = new Set();
-  for (const b of state.books) {
-    if (b.coverId) used.add(b.coverId);
-    for (const c of b.chapters) {
-      for (const m of (c.content || '').matchAll(/img:([a-z0-9]+)/gi)) used.add(m[1]);
-    }
-  }
-  return used;
+function extractImageIds(text) {
+  return new Set([...String(text || '').matchAll(/img:([a-z0-9]+)/gi)].map(m => m[1]));
 }
 
-// Deletes stored images that no book or chapter refers to any more.
-async function gcImages() {
-  if (!storageReady) return;
-  try {
-    const keys = await idb.keys('images');
-    const used = usedImageIds();
-    for (const id of keys.filter(k => !used.has(k))) {
-      if (pendingImageIds.has(id) || usedImageIds().has(id)) continue;   // re-check: state may have changed
-      await idb.del('images', id);
-      const cached = urlCache.get(id);
-      if (cached) cached.then(u => u && URL.revokeObjectURL(u));
-      urlCache.delete(id);
-    }
-  } catch (err) { console.error('Image cleanup failed', err); }
+// Deletes any image that was referenced before this edit (or uploaded during
+// this session) but isn't referenced in the final saved text — e.g. the user
+// added a picture then deleted the line, or removed one that was already saved.
+async function pruneOrphanedImages(oldContent, newContent) {
+  const keep = extractImageIds(newContent);
+  const toCheck = new Set([...extractImageIds(oldContent || ''), ...pendingUploadIds]);
+  await Promise.all([...toCheck].filter(id => !keep.has(id)).map(id => deleteImage(id)));
+}
+
+function discardPendingUploads() {
+  const ids = [...pendingUploadIds];
+  pendingUploadIds.clear();
+  ids.forEach(id => deleteImage(id));
 }
 
 // ── Markdown Parser (no deps) ───────────────
@@ -500,31 +476,66 @@ async function importMarkdownFiles(fileList) {
 
   const added = [];
   let unmatched = 0;
+  const base = Date.now();
+  let n = 0;
   for (const f of mdFiles) {
     try {
       const { title, body } = splitMarkdownDoc(await readText(f), f.name);
       const rewritten = rewriteImageRefs(body, imageMap);
       unmatched += rewritten.missing;
-      added.push({ id: uid(), title, content: rewritten.text, isInfo: false });
+      const order = base + n++;
+      const id = uid();
+      const data = { id, bookId: book.id, title, content: rewritten.text, isInfo: false, order };
+      await idbPut('chapters', data);
+      added.push(data);
     } catch (err) {
-      console.error(err);
-      toast(`Couldn't read ${f.name}.`);
+      toast(`Couldn't import ${f.name} — ${friendlyError(err)}`);
     }
   }
   if (added.length === 0) return;
 
   book.chapters.push(...added);
-  if (!(await save())) {
-    book.chapters = book.chapters.filter(c => !added.includes(c));   // roll back
-    return;
-  }
-  pendingImageIds.clear();
+  pendingUploadIds.clear();   // everything above is now committed to saved chapters
+  await syncChapterCounts(book);
   updateChapterBadge(book);
   renderChapterSidebar(book);
   viewChapter(book, added[0].id);
   toast(`Imported ${added.length} chapter${added.length !== 1 ? 's' : ''}` +
     (unmatched ? ` — ${unmatched} local image${unmatched !== 1 ? 's' : ''} not found. Select images together with the .md files to include them.` : '.'));
-  gcImages();
+}
+
+// Writes the book's chapter/info counts, kept in sync so the library view
+// (which doesn't load full chapter lists) can still show accurate counts.
+async function syncChapterCounts(book) {
+  const counts = chapterCounts(book);
+  try {
+    const existing = await idbGet('books', book.id);
+    if (existing) await idbPut('books', { ...existing, chapterCount: counts.total, infoCount: counts.info });
+    book.chapterCount = counts.total;
+    book.infoCount = counts.info;
+  } catch (err) { console.error('Could not update chapter counts', err); }
+}
+
+// ── Data loading ───────────────────────────
+async function loadBooks() {
+  const all = await idbGetAll('books');
+  all.sort((a, b) => (a.order || 0) - (b.order || 0));
+  state.books = all.map(data => ({
+    id: data.id,
+    title: data.title || 'Untitled Book',
+    description: data.description || '',
+    coverId: data.coverId || null,
+    order: data.order || 0,
+    chapterCount: data.chapterCount || 0,
+    infoCount: data.infoCount || 0,
+    chapters: undefined,   // loaded lazily when the book is opened
+  }));
+}
+
+async function loadChapters(book) {
+  const all = await idbGetAllByIndex('chapters', 'bookId', book.id);
+  all.sort((a, b) => (a.order || 0) - (b.order || 0));
+  book.chapters = all;
 }
 
 // ── Library View ───────────────────────────
@@ -578,17 +589,36 @@ function renderLibrary() {
     card.querySelector('.btn-del').addEventListener('click', e => {
       e.stopPropagation();
       confirmDelete(`Delete "${book.title}"? All chapters will be lost.`, async () => {
+        try {
+          await deleteBookCompletely(book);
+        } catch (err) {
+          toast(friendlyError(err));
+          return;
+        }
         state.books = state.books.filter(b => b.id !== book.id);
-        await save();
         renderLibrary();
         toast('Book deleted.');
-        gcImages();
       });
     });
 
     grid.appendChild(card);
     hydrateImages(card);
   });
+}
+
+// Deletes the book record, every chapter under it, and every image (cover +
+// any referenced in a chapter). IndexedDB has no cascade delete, so chapters
+// are fetched and removed explicitly.
+async function deleteBookCompletely(book) {
+  const chapters = Array.isArray(book.chapters) ? book.chapters : await idbGetAllByIndex('chapters', 'bookId', book.id);
+  const imageIds = new Set();
+  if (book.coverId) imageIds.add(book.coverId);
+  for (const ch of chapters) {
+    await idbDelete('chapters', ch.id);
+    for (const id of extractImageIds(ch.content)) imageIds.add(id);
+  }
+  await idbDelete('books', book.id);
+  await Promise.all([...imageIds].map(id => deleteImage(id)));
 }
 
 // ── Book View ──────────────────────────────
@@ -602,15 +632,20 @@ function showWelcome(book) {
     </div>`;
 }
 
-function openBook(id) {
+async function openBook(id) {
   state.currentBookId = id;
   state.currentChapterId = null;
   const book = bookById(id);
   $('book-title-display').textContent = book.title;
+  showView('view-book');
+  if (!Array.isArray(book.chapters)) {
+    $('chapter-list').innerHTML = '<li class="sidebar-loading">Loading…</li>';
+    try { await loadChapters(book); }
+    catch (err) { toast(friendlyError(err)); book.chapters = []; }
+  }
   updateChapterBadge(book);
   renderChapterSidebar(book);
   showWelcome(book);
-  showView('view-book');
 }
 
 function updateChapterBadge(book) {
@@ -641,8 +676,15 @@ function renderChapterSidebar(book) {
     li.querySelector('.btn-ch-edit').addEventListener('click', () => openEditor(book.id, ch.id));
     li.querySelector('.btn-del').addEventListener('click', () => {
       confirmDelete(`Delete chapter "${ch.title}"?`, async () => {
+        try {
+          await idbDelete('chapters', ch.id);
+          await Promise.all([...extractImageIds(ch.content)].map(id => deleteImage(id)));
+        } catch (err) {
+          toast(friendlyError(err));
+          return;
+        }
         book.chapters = book.chapters.filter(c => c.id !== ch.id);
-        await save();
+        await syncChapterCounts(book);
         updateChapterBadge(book);
         renderChapterSidebar(book);
         if (state.currentChapterId === ch.id) {
@@ -650,7 +692,6 @@ function renderChapterSidebar(book) {
           showWelcome(book);
         }
         toast('Chapter deleted.');
-        gcImages();
       });
     });
     list.appendChild(li);
@@ -708,16 +749,15 @@ function openEditor(bookId, chapterId) {
   $('editor-preview').innerHTML = '';
   setEditorMode('write');
   editorDirty = false;
-  pendingImageIds.clear();
+  pendingUploadIds.clear();
 
   showView('view-editor');
 }
 
 function leaveEditor() {
   editorDirty = false;
-  pendingImageIds.clear();
+  discardPendingUploads();
   openBook(state.currentBookId);
-  gcImages();
 }
 
 ['editor-chapter-title', 'editor-textarea', 'editor-is-info'].forEach(id => {
@@ -741,25 +781,38 @@ $('btn-save-chapter').addEventListener('click', async () => {
   const content = $('editor-textarea').value;
   const isInfo = $('editor-is-info').checked;
   const book = bookById(state.currentBookId);
+  const btn = $('btn-save-chapter');
+  btn.disabled = true;
 
-  if (state.currentChapterId) {
-    const ch = chapterById(book, state.currentChapterId);
-    ch.title = title;
-    ch.content = content;
-    ch.isInfo = isInfo;
-  } else {
-    const newCh = { id: uid(), title, content, isInfo };
-    book.chapters.push(newCh);
-    state.currentChapterId = newCh.id;
+  const previousContent = state.currentChapterId ? chapterById(book, state.currentChapterId).content : '';
+  try {
+    if (state.currentChapterId) {
+      const ch = chapterById(book, state.currentChapterId);
+      const order = ch.order ?? Date.now();
+      await idbPut('chapters', { id: ch.id, bookId: book.id, title, content, isInfo, order });
+      ch.title = title; ch.content = content; ch.isInfo = isInfo;
+    } else {
+      const id = uid();
+      const order = Date.now();
+      const newCh = { id, bookId: book.id, title, content, isInfo, order };
+      await idbPut('chapters', newCh);
+      book.chapters.push(newCh);
+      state.currentChapterId = newCh.id;
+    }
+    await pruneOrphanedImages(previousContent, content);
+    await syncChapterCounts(book);
+  } catch (err) {
+    toast(friendlyError(err));
+    btn.disabled = false;
+    return;   // stay in the editor so nothing is lost
   }
-  if (!(await save())) return;   // stay in the editor so nothing is lost
+  btn.disabled = false;
   const savedChapterId = state.currentChapterId;   // openBook() below resets state.currentChapterId
   editorDirty = false;
-  pendingImageIds.clear();
+  pendingUploadIds.clear();
   toast('Chapter saved.');
   openBook(state.currentBookId);
   viewChapter(book, savedChapterId);
-  gcImages();
 });
 
 $('btn-back-book').addEventListener('click', () => {
@@ -791,8 +844,7 @@ async function addImagesToEditor(fileList) {
       insertAtCursor(ta, `\n\n![${alt}](img:${id})\n\n`);
       added++;
     } catch (err) {
-      console.error(err);
-      toast(`Couldn't add ${f.name}.`);
+      toast(`Couldn't add ${f.name} — ${friendlyError(err)}`);
     }
   }
   if (added) toast(`Added ${added} picture${added !== 1 ? 's' : ''}.`);
@@ -825,8 +877,9 @@ $('input-import-md').addEventListener('change', e => {
 });
 
 // ── Book Modal ─────────────────────────────
-// pendingCover: undefined = unchanged, null = remove cover, string = new image id
-let pendingCover;
+// pendingCoverId: undefined = unchanged, null = removed, string = newly uploaded id (not yet saved)
+let pendingCoverId;
+let previousCoverId = null;   // the book's cover before this modal session, for cleanup if replaced
 
 async function showCoverPreview(imageId) {
   const preview = $('cover-preview');
@@ -846,9 +899,10 @@ async function showCoverPreview(imageId) {
 
 function openBookModal(bookId) {
   state.editingBookId = bookId || null;
-  pendingCover = undefined;
-  pendingImageIds.clear();
+  pendingCoverId = undefined;
+  pendingUploadIds.clear();
   const book = bookId ? bookById(bookId) : null;
+  previousCoverId = book ? (book.coverId || null) : null;
 
   $('modal-book-title').textContent = book ? 'Edit Book' : 'New Book';
   $('input-book-title').value = book ? book.title : '';
@@ -869,41 +923,58 @@ $('modal-book').addEventListener('click', e => {
   if (e.target === e.currentTarget) closeBookModal();
 });
 
+function hideBookModal() { $('modal-book').classList.add('hidden'); }
+
+// Cancel / dismiss: discard anything uploaded during this modal session that was never saved.
 function closeBookModal() {
-  $('modal-book').classList.add('hidden');
-  const hadUnsavedUpload = pendingImageIds.size > 0;
-  pendingImageIds.clear();
-  pendingCover = undefined;
-  if (hadUnsavedUpload) gcImages();
+  hideBookModal();
+  discardPendingUploads();
+  pendingCoverId = undefined;
 }
 
 async function saveBook() {
   const title = $('input-book-title').value.trim();
   if (!title) { toast('Please enter a title.'); return; }
   const description = $('input-book-description').value.trim();
+  const btn = $('btn-modal-save');
+  btn.disabled = true;
   let book;
 
-  if (state.editingBookId) {
-    book = bookById(state.editingBookId);
-    book.title = title;
-    book.description = description;
-    if (pendingCover !== undefined) book.coverId = pendingCover;
-  } else {
-    book = { id: uid(), title, description, coverId: pendingCover || null, chapters: [] };
-    state.books.push(book);
+  try {
+    if (state.editingBookId) {
+      book = bookById(state.editingBookId);
+      const finalCoverId = pendingCoverId !== undefined ? pendingCoverId : book.coverId;
+      const existing = await idbGet('books', book.id);
+      await idbPut('books', { ...existing, title, description, coverId: finalCoverId ?? null });
+      if (pendingCoverId !== undefined && previousCoverId && previousCoverId !== pendingCoverId) {
+        deleteImage(previousCoverId);   // old cover replaced/removed
+      }
+      book.title = title;
+      book.description = description;
+      book.coverId = finalCoverId ?? null;
+    } else {
+      const id = uid();
+      const data = { id, title, description, coverId: pendingCoverId || null, order: Date.now(), chapterCount: 0, infoCount: 0 };
+      await idbPut('books', data);
+      book = { ...data, chapters: [] };
+      state.books.push(book);
+    }
+  } catch (err) {
+    toast(friendlyError(err));
+    btn.disabled = false;
+    return;
   }
-  if (!(await save())) return;
+  btn.disabled = false;
+  pendingUploadIds.delete(pendingCoverId);   // now committed, no longer "unsaved"
+  pendingCoverId = undefined;
   toast(state.editingBookId ? 'Book updated.' : 'Book created.');
 
   if ($('view-book').classList.contains('active') && state.currentBookId === book.id) {
     $('book-title-display').textContent = title;
     if (!state.currentChapterId) showWelcome(book);
   }
-  $('modal-book').classList.add('hidden');
-  pendingImageIds.clear();
-  pendingCover = undefined;
+  hideBookModal();
   renderLibrary();
-  gcImages();   // drops the old cover if it was replaced or removed
 }
 
 $('cover-upload-area').addEventListener('click', () => $('input-cover').click());
@@ -915,16 +986,23 @@ $('input-cover').addEventListener('change', async e => {
   e.target.value = '';
   if (!file) return;
   try {
+    if (pendingCoverId) {   // replacing an upload from earlier in this same modal session
+      pendingUploadIds.delete(pendingCoverId);
+      deleteImage(pendingCoverId);
+    }
     const id = await storeImage(file, 1200);
-    pendingCover = id;
+    pendingCoverId = id;
     showCoverPreview(id);
   } catch (err) {
-    console.error(err);
-    toast("Couldn't use that file — pick a PNG, JPG or WEBP image.");
+    toast(`Couldn't use that file — ${friendlyError(err)}`);
   }
 });
 $('btn-remove-cover').addEventListener('click', () => {
-  pendingCover = null;
+  if (pendingCoverId) {
+    pendingUploadIds.delete(pendingCoverId);
+    deleteImage(pendingCoverId);
+  }
+  pendingCoverId = null;
   showCoverPreview(null);
 });
 
@@ -984,13 +1062,16 @@ document.addEventListener('keydown', e => {
   }
 });
 
-// ── Init ───────────────────────────────────
-(async function init() {
-  $('library-grid').style.visibility = 'hidden';   // avoid flashing the empty state while loading
-  await load();
+// ── Startup ────────────────────────────────
+// Everything lives in this browser's IndexedDB, so there's no sign-in step —
+// just load whatever's already stored and show the library.
+(async function start() {
+  showView('view-library');
+  $('library-grid').style.visibility = 'hidden';
+  try { await loadBooks(); }
+  catch (err) { toast(friendlyError(err)); }
   renderLibrary();
   $('library-grid').style.visibility = '';
-  showView('view-library');
-  if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
-  gcImages();
+})();
+
 })();
