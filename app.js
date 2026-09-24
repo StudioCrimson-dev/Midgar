@@ -1,6 +1,6 @@
 /* ─────────────────────────────────────────────
    MIDGAR — app.js
-   Storage: IndexedDB (local to this browser)
+   Storage: IndexedDB (local to your browser)
 ───────────────────────────────────────────── */
 (function () {
 'use strict';
