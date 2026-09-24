@@ -189,4 +189,4 @@ Ideas that would be natural next steps, not yet implemented:
 
 ## License
 
-Add whatever license fits your project here.
+Currently empty because the project is private.
