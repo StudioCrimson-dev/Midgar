@@ -1,0 +1,86 @@
+/* Midgar — GTK stylesheet layered on libadwaita. */
+
+.book-card {
+  padding: 6px;
+  border-radius: 14px;
+  transition: background-color 150ms ease;
+}
+flowboxchild { border-radius: 16px; padding: 0; }
+flowboxchild:hover .book-card { background-color: alpha(currentColor, 0.05); }
+flowboxchild:focus-visible { outline: 2px solid @accent_color; outline-offset: 2px; }
+
+.book-cover {
+  border-radius: 10px;
+  box-shadow: 0 1px 2px alpha(black, 0.18), 0 6px 18px alpha(black, 0.12);
+  background-color: alpha(currentColor, 0.06);
+}
+.book-cover.placeholder {
+  background-image: linear-gradient(160deg, alpha(@accent_bg_color, 0.95), shade(@accent_bg_color, 0.62));
+  color: white;
+}
+.book-cover.placeholder .cover-initials {
+  font-size: 36px;
+  font-weight: 800;
+  letter-spacing: 1px;
+}
+.book-cover.placeholder .cover-title {
+  font-weight: 600;
+  font-size: 13px;
+  opacity: 0.9;
+}
+.book-cover.small { border-radius: 6px; box-shadow: 0 1px 3px alpha(black, 0.2); }
+.book-cover.small .cover-initials { font-size: 16px; }
+
+.book-card .card-title { font-weight: 700; font-size: 14px; }
+.book-card .card-meta { font-size: 12px; }
+
+.drop-before { box-shadow: inset 3px 0 0 @accent_color; }
+.drop-after  { box-shadow: inset -3px 0 0 @accent_color; }
+row.drop-before { box-shadow: inset 0 3px 0 @accent_color; }
+row.drop-after  { box-shadow: inset 0 -3px 0 @accent_color; }
+.dragging { opacity: 0.4; }
+
+.chapter-row { padding: 4px 2px; }
+.chapter-number {
+  font-feature-settings: "tnum";
+  font-size: 12px;
+  min-width: 22px;
+}
+.info-pill {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.6px;
+  padding: 1px 7px;
+  border-radius: 99px;
+  background-color: alpha(@accent_bg_color, 0.18);
+  color: @accent_color;
+}
+
+.sidebar-book-title { font-weight: 800; font-size: 15px; }
+
+.editor-title {
+  font-size: 26px;
+  font-weight: 800;
+  background: none;
+  box-shadow: none;
+  outline: none;
+  padding: 4px 0;
+}
+.editor-title:focus-within { box-shadow: none; outline: none; }
+textview.writing {
+  font-family: "Source Serif 4", "Noto Serif", "Literata", "DejaVu Serif", serif;
+  font-size: 13.5pt;
+  line-height: 1.6;
+}
+textview.writing.monospace {
+  font-family: "JetBrains Mono", "Cascadia Code", "Fira Code", "DejaVu Sans Mono", monospace;
+  font-size: 11.5pt;
+}
+.format-bar { padding: 4px 8px; }
+.format-bar button { min-width: 30px; min-height: 30px; padding: 2px 6px; }
+.format-bar .heading-btn { font-weight: 800; font-size: 13px; }
+.status-bar { padding: 4px 14px; font-size: 12px; }
+.unsaved-dot { color: @warning_color; font-weight: 800; }
+
+.cover-picker { padding: 0; border-radius: 10px; }
+.search-result-book { font-size: 12px; }

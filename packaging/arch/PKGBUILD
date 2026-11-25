@@ -1,0 +1,60 @@
+# Maintainer: Studio Crimson
+#
+# Builds Midgar from this source checkout:
+#   cd packaging/arch && makepkg -si
+pkgname=midgar
+pkgver=2.0.0
+pkgrel=1
+pkgdesc="A private, offline personal library for writing and reading your own books"
+arch=('any')
+url="https://github.com/StudioCrimson-dev/The-Library"
+license=('LicenseRef-Proprietary')
+depends=(
+  'python'
+  'python-gobject'
+  'gtk4'
+  'libadwaita'
+  'webkitgtk-6.0'
+  'gtksourceview5'
+  'gdk-pixbuf2'
+)
+makedepends=('python-build' 'python-installer' 'python-setuptools' 'python-wheel')
+checkdepends=('python-pytest')
+optdepends=(
+  'xdg-desktop-portal-gtk: native file pickers and light/dark style following on Hyprland and other wlroots compositors'
+  'webp-pixbuf-loader: WebP picture support'
+  'noto-fonts: serif reading font'
+)
+source=()
+sha256sums=()
+
+_appid=io.github.studiocrimson_dev.Midgar
+_src="$startdir/../.."
+
+prepare() {
+  rm -rf "$srcdir/$pkgname"
+  mkdir -p "$srcdir/$pkgname"
+  cp -r "$_src"/{midgar,data,tests,pyproject.toml,README.md} "$srcdir/$pkgname/"
+  find "$srcdir/$pkgname" -name '__pycache__' -prune -exec rm -rf {} +
+}
+
+build() {
+  cd "$srcdir/$pkgname"
+  python -m build --wheel --no-isolation
+}
+
+check() {
+  cd "$srcdir/$pkgname"
+  python -m pytest -q tests
+}
+
+package() {
+  cd "$srcdir/$pkgname"
+  python -m installer --destdir="$pkgdir" dist/*.whl
+  install -Dm644 "data/$_appid.desktop" "$pkgdir/usr/share/applications/$_appid.desktop"
+  install -Dm644 "data/$_appid.metainfo.xml" "$pkgdir/usr/share/metainfo/$_appid.metainfo.xml"
+  install -Dm644 "data/icons/hicolor/scalable/apps/$_appid.svg" \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/$_appid.svg"
+  install -Dm644 "data/icons/hicolor/symbolic/apps/$_appid-symbolic.svg" \
+    "$pkgdir/usr/share/icons/hicolor/symbolic/apps/$_appid-symbolic.svg"
+}

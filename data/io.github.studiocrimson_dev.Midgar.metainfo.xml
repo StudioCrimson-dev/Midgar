@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.studiocrimson_dev.Midgar</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <name>Midgar</name>
+  <summary>Write and read your own books, privately and offline</summary>
+  <description>
+    <p>
+      Midgar is a quiet, distraction-free personal library. Organise long-form
+      writing into books and chapters, write in Markdown with inline pictures,
+      and read it back in a clean, book-like view.
+    </p>
+    <p>
+      Everything stays on your device in a single private database. Midgar has
+      no accounts, no sync and makes no network connections.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.studiocrimson_dev.Midgar.desktop</launchable>
+  <url type="homepage">https://github.com/StudioCrimson-dev/The-Library</url>
+  <developer id="io.github.studiocrimson_dev">
+    <name>Studio Crimson</name>
+  </developer>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="2.0.0" date="2026-11-25">
+      <description><p>Rebuilt as a native GTK 4 / libadwaita application.</p></description>
+    </release>
+  </releases>
+</component>

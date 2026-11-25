@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "midgar"
+version = "2.0.0"
+description = "A private, offline personal library for writing and reading your own books"
+readme = "README.md"
+requires-python = ">=3.11"
+# PyGObject, GTK 4, libadwaita, WebKitGTK 6 and GtkSourceView 5 come from the
+# system package manager (see packaging/arch/PKGBUILD), not from PyPI.
+dependencies = []
+
+[project.gui-scripts]
+midgar = "midgar.application:main"
+
+[tool.setuptools]
+packages = ["midgar"]
+
+[tool.setuptools.package-data]
+midgar = ["style.css"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
