@@ -29,6 +29,10 @@ source=()
 sha256sums=()
 
 _appid=io.github.studiocrimson_dev.Midgar
+# Always use Arch's system Python. Version managers (mise, pyenv, asdf, conda…)
+# put their own `python` first on PATH; it lacks the packages installed by
+# pacman, and the installed launcher would point at it.
+_python=/usr/bin/python
 _src="$startdir/../.."
 
 prepare() {
@@ -40,17 +44,17 @@ prepare() {
 
 build() {
   cd "$srcdir/$pkgname"
-  python -m build --wheel --no-isolation
+  "$_python" -m build --wheel --no-isolation
 }
 
 check() {
   cd "$srcdir/$pkgname"
-  python -m pytest -q tests
+  "$_python" -m pytest -q tests
 }
 
 package() {
   cd "$srcdir/$pkgname"
-  python -m installer --destdir="$pkgdir" dist/*.whl
+  "$_python" -m installer --destdir="$pkgdir" dist/*.whl
   install -Dm644 "data/$_appid.desktop" "$pkgdir/usr/share/applications/$_appid.desktop"
   install -Dm644 "data/$_appid.metainfo.xml" "$pkgdir/usr/share/metainfo/$_appid.metainfo.xml"
   install -Dm644 "data/icons/hicolor/scalable/apps/$_appid.svg" \

@@ -60,15 +60,23 @@ Recommended optional packages:
 | `webp-pixbuf-loader`     | Lets you add `.webp` pictures                                   |
 | `noto-fonts`             | A good serif face for the reader (any installed serif works)    |
 
+### Troubleshooting
+
+- **`No module named build` / `No module named gi`** — an older copy of the
+  PKGBUILD, or running from source, picked up a Python from a version manager
+  (mise, pyenv, asdf, conda — Omarchy sets up mise by default) instead of
+  Arch's. The current PKGBUILD always uses `/usr/bin/python`; `git pull` and
+  run `makepkg -si` again. To run from source, use `/usr/bin/python -m midgar`.
+
 ### Running from source
 
 No build step is needed during development:
 
 ```bash
-python -m midgar
+/usr/bin/python -m midgar
 ```
 
-Run the tests with `python -m pytest`.
+Run the tests with `/usr/bin/python -m pytest`.
 
 ## Hyprland notes
 
