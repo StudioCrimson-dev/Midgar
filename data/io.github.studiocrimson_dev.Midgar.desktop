@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Midgar
+GenericName=Personal Library
+Comment=Write and read your own books, privately and offline
+Exec=midgar
+Icon=io.github.studiocrimson_dev.Midgar
+Terminal=false
+Categories=Office;WordProcessor;GTK;
+Keywords=book;library;writing;novel;markdown;chapter;reader;
+StartupNotify=true
+DBusActivatable=false

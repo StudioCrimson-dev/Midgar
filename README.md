@@ -1,123 +1,188 @@
 # Midgar
 
-A quiet, distraction-free place to write and read your own books. Midgar is a
-single-page web app for organizing long-form writing into books and chapters,
-with Markdown formatting, inline images, and a clean reading view — all
-stored entirely in your browser.
+A quiet, private place to write and read your own books — now a native
+Linux desktop app built with GTK 4 and libadwaita, designed for Arch Linux
+and tuned for tiling Wayland compositors such as **Hyprland**.
 
-No sign-in, no server, no account. Open the page and start writing.
+Organise long-form writing into books and chapters, write in Markdown with
+inline pictures, and read it back in a clean, book-like view. Everything
+stays on your device. There are no accounts, no sync and no network
+connections — ever.
 
 ---
 
 ## Features
 
-- **Books & chapters** — organize your writing into books, each with any
-  number of chapters. Chapters can be marked as "informational" (e.g. notes,
-  glossaries, worldbuilding) and are called out separately from the regular
-  chapter count.
-- **Markdown editor** — a built-in Markdown renderer (no external libraries)
-  supports headings, bold/italic/strikethrough, blockquotes, ordered and
-  unordered lists (with nesting), fenced code blocks, tables, links, and
-  images. A live **Preview** toggle lets you see the rendered chapter before
-  saving.
-- **Images, inline** — drop an image into the editor, paste one from your
-  clipboard, or use the **+ Image** button. Images are stored locally
-  alongside your text and referenced from it, so chapters stay portable.
-  Book covers work the same way.
-- **Markdown import** — bulk-import `.md` / `.markdown` / `.mdown` / `.txt`
-  files as chapters in one go. Select any images referenced by those files at
-  the same time and Midgar matches them up by file name automatically.
-- **Autosave-safe editing** — Midgar warns you before you navigate away or
-  close the tab with unsaved chapter changes, and `Ctrl`/`Cmd`+`S` saves the
-  current chapter from anywhere in the editor.
-- **Fully local & private** — everything you write stays on your device.
-  There's no account, no network requests, and nothing is ever sent
-  anywhere.
+- **Library** — a cover grid of your books. Drag covers to reorder them (or
+  use *Move Earlier / Later* from the card menu). Books without a cover get a
+  typographic one automatically.
+- **Books & chapters** — any number of chapters per book. Chapters can be
+  marked as **information chapters** (notes, glossaries, worldbuilding); they
+  are labelled `INFO`, left out of the chapter numbering and counted
+  separately. Drag chapters in the sidebar to reorder them.
+- **Reader** — a typeset reading view with chapter eyebrows, previous / next
+  navigation, adjustable text size and a serif or sans typeface. It follows
+  your light / dark preference.
+- **Editor** — Markdown with syntax highlighting, a formatting toolbar,
+  live **Write / Preview** switcher, word and character counts, and an
+  unsaved-changes guard (you can't lose work by closing the editor or the
+  window).
+- **Pictures** — paste, drag-and-drop or insert images. Large photos are
+  downscaled automatically; pictures are stored inside the library and
+  referenced from the text as `img:<id>`.
+- **Library-wide search** — `Ctrl+F` searches book titles, descriptions,
+  chapter titles and chapter text, with result snippets.
+- **Import Markdown** — bulk-import `.md` / `.markdown` / `.mdown` / `.txt`
+  files as chapters. Select the referenced pictures at the same time and they
+  are matched up by file name.
+- **Export & backup** — see [Your data](#your-data).
 
-## How it works
-
-Midgar is a static site: one HTML page, one stylesheet, and one JavaScript
-file. There's no backend and no build step.
-
-| File          | Purpose                                                        |
-|---------------|-----------------------------------------------------------------|
-| `index.html`  | Page structure/markup for every view (library, book, editor).  |
-| `style.css`   | All visual styling.                                             |
-| `app.js`      | App logic: rendering, the Markdown parser, and the data layer.  |
-
-### Storage: IndexedDB
-
-Midgar stores all of your data in [IndexedDB](https://developer.mozilla.org/en-US/docs/Web/API/IndexedDB_API),
-a structured database built into every modern browser. It's used instead of
-`localStorage` because it can hold much more data and — importantly — can
-store binary data (your images) directly, rather than needing them
-base64-encoded into text.
-
-The database is named `midgar-db` and has three object stores:
-
-- **`books`** — one record per book: `id`, `title`, `description`,
-  `coverId` (points at an image), `order`, and denormalized `chapterCount`
-  / `infoCount` so the library grid doesn't need to load full chapter lists.
-- **`chapters`** — one record per chapter: `id`, `bookId` (indexed, so a
-  book's chapters can be looked up directly), `title`, `content` (the raw
-  Markdown text), `isInfo`, and `order`.
-- **`images`** — one record per image: `id` and the raw `blob` (with its
-  MIME `type`). Chapter and cover text never embeds image data directly —
-  they reference an image by writing `![alt](img:<id>)`, and Midgar resolves
-  that to the actual picture (as a temporary [object URL](https://developer.mozilla.org/en-US/docs/Web/API/URL/createObjectURL_static))
-  at render time.
-
-This means a chapter's Markdown source is always plain, portable text — the
-`img:` references just aren't meaningful outside this app's own database.
-
-### What this means for your data
-
-- **It's per-browser, per-device.** Your library lives in *this browser's*
-  storage on *this device*. It won't show up if you open Midgar in a
-  different browser, a different computer, or a private/incognito window.
-- **Clearing site data deletes it.** If you (or your browser) clear cookies
-  and site data, use a "clean up storage" tool, or clear IndexedDB
-  specifically, your library is gone. There is currently no export/backup
-  feature — treat this as you would any other local-only app.
-- **There's no sync.** Midgar doesn't talk to a network at all, so nothing
-  is backed up automatically. If this matters to you, periodically copying
-  your chapters' text elsewhere is worth doing until an export feature
-  exists (see [Possible improvements](#possible-improvements)).
-- **Private/incognito windows work, but don't persist.** Some browsers
-  restrict or wipe IndexedDB when a private window closes — fine for trying
-  Midgar out, not for anything you want to keep.
-
-## Running it
-
-Midgar needs no build tools, no `npm install`, and no server-side code.
-
-**Option 1 — just open it.**
-Double-click `index.html`, or open it via `File → Open` in your browser.
-IndexedDB works fine from a `file://` URL in every major browser.
-
-**Option 2 — serve it locally** (optional, but a good habit for web
-projects in general):
+## Install (Arch Linux)
 
 ```bash
-# from the project folder
-python3 -m http.server 8000
-# then visit http://localhost:8000
+git clone https://github.com/StudioCrimson-dev/The-Library.git
+cd The-Library/packaging/arch
+makepkg -si
 ```
 
-Either way works identically — there's nothing to configure.
+This builds a regular pacman package (`midgar`) from your checkout, runs the
+test-suite and installs the `midgar` command, desktop entry, icon and
+AppStream metadata. Remove it with `sudo pacman -R midgar`.
 
-## Browser support
+Runtime dependencies (installed automatically): `python`, `python-gobject`,
+`gtk4`, `libadwaita`, `webkitgtk-6.0`, `gtksourceview5`, `gdk-pixbuf2`.
 
-Midgar uses IndexedDB, the Canvas API (for resizing images before storing
-them), and standard ES2017+ JavaScript. It works in current versions of
-Chrome, Firefox, Safari, and Edge. Very old browsers, or browsers with
-IndexedDB disabled by policy, won't be able to run it — Midgar will show a
-toast explaining that local storage isn't available rather than failing
-silently.
+Recommended optional packages:
+
+| Package                  | Why                                                             |
+|--------------------------|-----------------------------------------------------------------|
+| `xdg-desktop-portal-gtk` | Native file pickers and light/dark following on Hyprland        |
+| `webp-pixbuf-loader`     | Lets you add `.webp` pictures                                   |
+| `noto-fonts`             | A good serif face for the reader (any installed serif works)    |
+
+### Running from source
+
+No build step is needed during development:
+
+```bash
+python -m midgar
+```
+
+Run the tests with `python -m pytest`.
+
+## Hyprland notes
+
+Midgar is a native Wayland client (no XWayland) and draws its own header bar,
+so it doesn't depend on compositor decorations.
+
+- **Window class / app id:** `io.github.studiocrimson_dev.Midgar` — use it in
+  window rules, e.g. (Hyprland's `windowrulev2` syntax; adjust to your
+  version):
+
+  ```ini
+  windowrulev2 = workspace 3, class:^(io\.github\.studiocrimson_dev\.Midgar)$
+  ```
+
+- **Tiling-friendly layout:** the book view collapses its chapter sidebar into
+  an overlay below ~760 px wide, so it stays usable in narrow tiles; the
+  library grid reflows to any width.
+- **Dark mode:** libadwaita reads the system colour scheme through the
+  desktop portal. On Hyprland install `xdg-desktop-portal-gtk` and set:
+
+  ```bash
+  gsettings set org.gnome.desktop.interface color-scheme prefer-dark
+  ```
+
+- **Hide the window buttons** if you never use them (tiling users often
+  don't): add `gtk-decoration-layout=:` under `[Settings]` in
+  `~/.config/gtk-4.0/settings.ini`.
+- **Keyboard first:** everything is reachable from the keyboard — see below or
+  press `Ctrl+?` in the app.
+
+## Keyboard shortcuts
+
+| Shortcut                   | Action                              |
+|----------------------------|-------------------------------------|
+| `Ctrl+N`                   | New book                            |
+| `Ctrl+F`                   | Search the library                  |
+| `Ctrl+Shift+B`             | Back up library                     |
+| `Ctrl+?`                   | Show all shortcuts                  |
+| `Ctrl+Q`                   | Quit                                |
+| `Alt+←` / `Alt+→`          | Previous / next chapter             |
+| `Ctrl+E`                   | Edit chapter                        |
+| `Ctrl+Shift+N`             | New chapter                         |
+| `Ctrl+I` (reading)         | Import Markdown into this book      |
+| `Alt+↑` / `Alt+↓`          | Move chapter up / down              |
+| `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Reader text size                |
+| `F9`                       | Toggle chapter sidebar              |
+| `Ctrl+S`                   | Save chapter                        |
+| `Ctrl+P`                   | Toggle Write / Preview              |
+| `Ctrl+B` / `Ctrl+I` (editor) | Bold / italic                     |
+| `Ctrl+K`                   | Insert link                         |
+| `Ctrl+Shift+I`             | Insert pictures                     |
+| `Esc` / `Ctrl+W`           | Close the editor                    |
+
+## Your data
+
+### Where it lives
+
+Everything — books, chapters and pictures — is stored in one SQLite database:
+
+```
+~/.local/share/midgar/library.db        ($XDG_DATA_HOME/midgar)
+~/.local/share/midgar/snapshots/        automatic daily snapshots (last 7)
+~/.local/share/midgar/safety/           copies made before a restore
+```
+
+Set `MIDGAR_DATA_DIR` to use a different folder (handy for a second, separate
+library or for testing).
+
+### Why SQLite
+
+- **Crash-safe.** Every change is a transaction written with write-ahead
+  logging and full sync, so a crash or power cut can't leave a half-saved
+  chapter or a corrupted library.
+- **Private.** The data folder is created `0700` and the database `0600` —
+  readable only by your user.
+- **One file to protect.** Easy to back up, easy to move.
+
+### Backups
+
+- **Automatic snapshots:** once a day, on start-up, Midgar keeps a consistent
+  copy of the library in `snapshots/` (the last seven days).
+- **Back Up Library…** (main menu, `Ctrl+Shift+B`) writes a single
+  self-contained `.midgar` file. Copy it wherever you like — a USB drive, your
+  own NAS or your own cloud storage. Midgar itself never uploads anything.
+- **Restore from Backup…** checks that the file is an intact Midgar library,
+  saves a safety copy of your current library, then replaces it.
+
+> Tip: don't copy `library.db` by hand while Midgar is running — use *Back Up
+> Library…*, which always produces a consistent file.
+
+### Export / import as Markdown
+
+- **Export as Markdown…** (per book, or *Export Library as Markdown…* from the
+  main menu) writes a zip containing one folder per book: numbered chapter
+  `.md` files with front matter (`title:`, `info: true`), an `images/`
+  folder, the cover, and a `book.json` with the book's details.
+- **Import Books from Export…** turns such a zip back into books (always as
+  new books — nothing existing is overwritten).
+- The chapter files are plain Markdown, so they also open in any other editor.
+
+## Privacy & security
+
+- No network code, no telemetry, no update checks.
+- The reader is a WebKitGTK view with JavaScript, plugins, media and storage
+  disabled, an ephemeral session (no cookies or cache on disk) and a strict
+  Content-Security-Policy that blocks every network fetch. Pictures are
+  inlined from the local database.
+- **Remote images are never loaded.** `![](https://…)` shows a "remote image
+  not loaded" note instead, so reading a chapter can't contact a server.
+- Links open in your web browser only when you click them.
+- Markdown never renders raw HTML — it is escaped and shown as text, so
+  imported files can't inject anything.
 
 ## Markdown reference
-
-Midgar's Markdown support covers the everyday subset:
 
 ```markdown
 # Heading 1
@@ -129,15 +194,14 @@ Midgar's Markdown support covers the everyday subset:
 > which can span multiple lines.
 
 - A bullet list
-- With nested items
-  - Like this
+  - nested
 
 1. A numbered list
 2. Keeps its order
 
-`inline code` and:
+`inline code`
 
-​```js
+​```
 a fenced code block
 ​```
 
@@ -146,47 +210,41 @@ a fenced code block
 | left     | centered |
 
 [A link](https://example.com)
-![An image](img:someuploadedimageid)
+![A picture](img:abc123)
 
 ---
 ```
-
-Raw HTML is not supported and is escaped rather than rendered, both for
-simplicity and so that imported `.md` files can't inject anything into the
-page.
-
-## Keyboard shortcuts
-
-| Shortcut          | Action                                  |
-|--------------------|------------------------------------------|
-| `Ctrl`/`Cmd` + `S` | Save the chapter you're editing          |
-| `Esc`              | Close whichever dialog is open           |
-| `Enter`            | Save, while focused in the book title field |
 
 ## Project structure
 
 ```
 midgar/
-├── index.html   # Views: library, book, chapter editor, modals
-├── style.css    # All styling
-├── app.js       # Rendering, Markdown parser, IndexedDB data layer
-└── README.md    # You are here
+├── application.py   # Adw.Application: startup, CSS, accelerators
+├── window.py        # Main window, navigation, import/export/backup actions
+├── library_page.py  # Cover grid, search, drag-to-reorder
+├── book_page.py     # Chapter sidebar + reader
+├── editor_page.py   # Markdown editor (GtkSourceView) + preview
+├── book_dialog.py   # New / edit book dialog
+├── reader.py        # Hardened WebKit reading view
+├── markdown.py      # Dependency-free, escaping Markdown renderer
+├── store.py         # SQLite data layer (no GTK — unit-tested)
+├── transfer.py      # Markdown import, zip export/import (no GTK)
+├── images.py        # Picture validation, downscaling, textures
+├── ui.py            # Dialog / file-picker helpers
+├── paths.py         # XDG data locations
+└── style.css        # App stylesheet
+data/                # .desktop file, AppStream metadata, icons
+packaging/arch/      # PKGBUILD
+tests/               # pytest suite for the storage, Markdown and transfer layers
 ```
 
-## Possible improvements
+## Coming from the web version
 
-Ideas that would be natural next steps, not yet implemented:
-
-- **Export/import** — a way to download your whole library (including
-  images) as a single file, and restore it later or move it to another
-  browser/device.
-- **Search** — finding a chapter by title or content across a large
-  library.
-- **Reordering** — drag-and-drop reordering of books and chapters (currently
-  order is set by creation time).
-- **Storage usage indicator** — since everything (including images) lives in
-  the browser, a way to see how much space your library is using.
+The previous browser version kept everything in the browser's IndexedDB,
+which the desktop app can't read. To bring writing across, copy each
+chapter's text into a `.md` file and use **Import Markdown…** in the book
+(select the pictures at the same time).
 
 ## License
 
-Currently empty because the project is private.
+Currently none, because the project is private.
